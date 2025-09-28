@@ -1,6 +1,6 @@
 # YavOracle: Coverage-Safe Fiat–Shamir in Rust
 
-A small Rust framework that lets you **write interactive proofs as they’re meant to run**,two programs exchanging typed messages, and then **swap the runtime** to get a correct non-interactive proof via Fiat–Shamir (FS). The core idea is **coverage safety**: every prover-controlled value that influences verification must be *bound into* the transcript **before** any challenge is sampled. If something relevant isn’t bound, your code won’t compile.
+A small Rust framework that lets you **write interactive proofs as they’re meant to run**, two programs exchanging typed messages, and then **swap the runtime** to get a correct non-interactive proof via Fiat–Shamir (FS). The core idea is **coverage safety**: every prover-controlled value that influences verification must be *bound into* the transcript **before** any challenge is sampled. If something relevant isn’t bound, your code won’t compile.
 
 This repository contains two crates:
 
