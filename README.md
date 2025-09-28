@@ -127,7 +127,7 @@ let tr_v: MyRound<_> = Transcript::new(verifier_oracle);
 
 ---
 
-## How binding & obligations work (the important part)
+## How binding & obligations work
 
 ### Field-level annotations
 
