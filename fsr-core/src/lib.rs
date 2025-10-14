@@ -139,7 +139,7 @@ impl<H: Oracle> Oracle for RecordingHashOracle<H> {
     }
 }
 
-// Small quality-of-life helper so you can pull the oracle out after proving.
+// Small quality-of-life helper so one can pull the oracle out after proving.
 impl<const PENDING: u128, O: Oracle> Transcript<PENDING, O> {
     pub fn into_oracle(self) -> O { self.oracle }
 }

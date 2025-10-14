@@ -125,9 +125,9 @@ fn do_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     // =========================================================================================
 
     // Determine prefix string for labels (e.g., "Commit")
-    // If you already parsed #[bind(prefix="...")], use that value. Otherwise default to the type name.
+    // If one already parsed #[bind(prefix="...")], use that value. Otherwise default to the type name.
     // let prefix_str: String = match parsed_prefix_opt {
-    //     Some(s) => s,                     // your parsed prefix string
+    //     Some(s) => s,                     // the parsed prefix string
     //     None    => type_ident.to_string() // fallback to type name
     // };
     let prefix_lit = LitStr::new(&prefix_str, Span::call_site());

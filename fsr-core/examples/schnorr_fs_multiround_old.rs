@@ -1,7 +1,7 @@
 use fsr_core::*;
 use fsr_proof_dsl::proof;
 
-// --- toy group & scalar from your existing examples ---
+// --- toy group & scalar ---
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct G1(pub u64);
 

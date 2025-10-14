@@ -37,12 +37,12 @@ struct ProofSpec {
 }
 
 enum SpecBody {
-    Single {                        // legacy (your current shape)
+    Single {
         fields: Vec<FieldSpec>,
         replay: ReplayBlock,
         check:  CheckBlock,
     },
-    Multi(Vec<RoundSpec>),          // NEW: multi-round
+    Multi(Vec<RoundSpec>),
 }
 
 struct RoundSpec {
@@ -313,10 +313,9 @@ fn expand(spec: ProofSpec) -> TokenStream2 {
     let fn_verify_b    = format_ident!("{}_verify_bytes", snake);
     let fn_src         = format_ident!("{}_verifier_source", snake);
 
-    // header compile-time config (use your existing code)
-    // ... (version_u8, include_domain, schema string bytes or your simple header) ...
-    // reuse your #header_encode and #header_decode snippets
-    // (omitted here for brevity; keep exactly what’s working for you)
+    // header compile-time config (use existing code)
+    // ... (version_u8, include_domain, schema string bytes or the simple header) ...
+    // reuse the #header_encode and #header_decode snippets
 
     // (helper to build replay emission for a block)
     let emit_replay = |rb: &ReplayBlock| -> Vec<TokenStream2> {
@@ -491,7 +490,7 @@ fn expand(spec: ProofSpec) -> TokenStream2 {
                                 a == b
                             };
                             if !__eq { return false; }
-                            // shadow with the re-derived value if you want to use `id` later
+                            // shadow with the re-derived value if one wants to use `id` later
                             let #id: #ty = #prime;
                         }
                     })

@@ -1,7 +1,7 @@
 use fsr_core::*;
 use fsr_proof_dsl::proof;
 
-// ===== toy group & scalar (same as your single-round) =====
+// ===== toy group & scalar (same as the single-round) =====
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct G1(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
