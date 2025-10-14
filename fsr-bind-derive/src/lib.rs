@@ -1,7 +1,8 @@
 use proc_macro::TokenStream;
-use quote::quote;
+use proc_macro2::Span;
+use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Fields, LitInt, LitStr, Path,
+    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Fields, LitInt, LitStr, Path, DataStruct, 
 };
 
 /// We purposely name the derive macro **FsrBindable** to avoid any name collision
@@ -23,6 +24,7 @@ pub fn derive_fsr_bindable(input: TokenStream) -> TokenStream {
         Err(e) => e.to_compile_error().into(),
     }
 }
+
 
 fn do_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let type_ident = input.ident.clone();
@@ -118,6 +120,75 @@ fn do_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     };
 
+
+
+    // =========================================================================================
+
+    // Determine prefix string for labels (e.g., "Commit")
+    // If you already parsed #[bind(prefix="...")], use that value. Otherwise default to the type name.
+    // let prefix_str: String = match parsed_prefix_opt {
+    //     Some(s) => s,                     // your parsed prefix string
+    //     None    => type_ident.to_string() // fallback to type name
+    // };
+    let prefix_lit = LitStr::new(&prefix_str, Span::call_site());
+
+    // Build per-field label consts for all *named* fields that are NOT #[bind(skip)]
+    let mut field_label_consts = Vec::new();
+
+    match &input.data {
+        Data::Struct(DataStruct { fields: Fields::Named(named), .. }) => {
+            for field in &named.named {
+                // Check if this field has #[bind(skip)]
+                let mut skip = false;
+                for attr in &field.attrs {
+                    if attr.path().is_ident("bind") {
+                        // syn v2 API
+                        let _ = attr.parse_nested_meta(|meta| {
+                            if meta.path.is_ident("skip") {
+                                skip = true;
+                            }
+                            Ok(())
+                        });
+                    }
+                }
+                if skip { continue; }
+
+                // Field ident (e.g., `t`, `z`)
+                let fname_ident = field.ident.as_ref()
+                    .expect("FsrBindable expects named fields");
+
+                // LABEL_<field> const name, e.g., LABEL_t
+                let const_ident = format_ident!("LABEL_{}", fname_ident);
+
+                // "Type.field" string, e.g., "Commit.t"
+                let label_lit = LitStr::new(
+                    &format!("{}.{}", prefix_str, fname_ident),
+                    Span::call_site()
+                );
+
+                field_label_consts.push(quote! {
+                    pub const #const_ident: &'static str = #label_lit;
+                });
+            }
+        }
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &input.ident,
+                "FsrBindable only supports structs with named fields",
+            ));
+        }
+    }
+
+    // Add an inherent impl that exports MSG_LABEL and LABEL_<field> for the struct
+    let labels_impl = quote! {
+        impl #type_ident {
+            pub const MSG_LABEL: &'static str = #prefix_lit;
+            #( #field_label_consts )*
+        }
+    };
+
+    // ========================================================================================================
+
     let mask_expr = if mask_terms.is_empty() {
         quote! { 0u128 }
     } else {
@@ -133,6 +204,8 @@ fn do_derive(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 #(#bind_stmts)*
             }
         }
+
+        #labels_impl
     };
 
     Ok(expanded)

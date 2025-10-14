@@ -11,6 +11,10 @@ pub trait CanonicalEncode {
     fn encode(&self, out: &mut Vec<u8>);
 }
 
+pub trait CanonicalDecode: Sized {
+    fn decode(input: &mut &[u8]) -> Option<Self>;
+}
+
 impl CanonicalEncode for u64 {
     fn encode(&self, out: &mut Vec<u8>) { out.extend_from_slice(&self.to_le_bytes()); }
 }
@@ -45,7 +49,7 @@ impl Challenge for U64Challenge {
 // ---------------- Oracle abstraction (FS or interactive) ----------------
 
 pub trait Oracle: Absorb {
-    fn challenge<C: Challenge>(&mut self, label: &'static str) -> C;
+    fn challenge<C: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> C;
 }
 
 pub struct HashOracle {
@@ -63,7 +67,7 @@ impl Absorb for HashOracle {
     }
 }
 impl Oracle for HashOracle {
-    fn challenge<C: Challenge>(&mut self, label: &'static str) -> C {
+    fn challenge<C: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> C {
         let mut material = Vec::with_capacity(self.buf.len() + label.len() + self.domain.len());
         material.extend_from_slice(self.domain);
         material.extend_from_slice(label.as_bytes());
@@ -71,6 +75,76 @@ impl Oracle for HashOracle {
         C::from_oracle_bytes(label, &material)
     }
 }
+
+
+// ---- FS proof recording (works with HashOracle) ----
+
+/// A single recorded transcript event (label + bytes) for FS proof emission.
+#[derive(Clone, Debug)]
+pub enum RecEvent {
+    Absorb { label: &'static str, bytes: Vec<u8> },
+    Challenge { label: &'static str, bytes: Vec<u8> },
+}
+
+/// Helper to allow for private data in transcript to be accessed for proof generation.
+pub trait IntoEvents {
+    fn into_events(self) -> Vec<RecEvent>;
+}
+
+/// Wraps an Absorb/Oracle and records the FS transcript timeline.
+/// Typical use: `RecordingHashOracle::new(HashOracle::new(DST))`.
+pub struct RecordingHashOracle<H = HashOracle> {
+    inner: H,
+    events: Vec<RecEvent>,
+}
+
+impl<H> RecordingHashOracle<H> {
+    pub fn new(inner: H) -> Self { Self { inner, events: Vec::new() } }
+    pub fn events(&self) -> &[RecEvent] { &self.events }
+    pub fn into_parts(self) -> (H, Vec<RecEvent>) { (self.inner, self.events) }
+
+    /// Find the latest absorbed bytes for a label (useful for proof emission).
+    pub fn find_absorb(&self, label: &str) -> Option<&[u8]> {
+        self.events.iter().rev().find_map(|e| match e {
+            RecEvent::Absorb { label: l, bytes } if *l == label => Some(bytes.as_slice()),
+            _ => None,
+        })
+    }
+    /// Find the latest challenge bytes for a label.
+    pub fn find_challenge(&self, label: &str) -> Option<&[u8]> {
+        self.events.iter().rev().find_map(|e| match e {
+            RecEvent::Challenge { label: l, bytes } if *l == label => Some(bytes.as_slice()),
+            _ => None,
+        })
+    }
+}
+
+impl<H: Absorb> Absorb for RecordingHashOracle<H> {
+    fn absorb_bytes(&mut self, label: &'static str, bytes: &[u8]) {
+        self.inner.absorb_bytes(label, bytes);
+        self.events.push(RecEvent::Absorb { label, bytes: bytes.to_vec() });
+    }
+}
+
+impl<H: Oracle> Oracle for RecordingHashOracle<H> {
+    fn challenge<C: Challenge>(&mut self, label: &'static str) -> C
+    where
+        C: Challenge + CanonicalEncode, // we need to encode C to record it
+    {
+        let c = self.inner.challenge::<C>(label);
+        let mut v = Vec::new();
+        c.encode(&mut v);
+        self.events.push(RecEvent::Challenge { label, bytes: v });
+        c
+    }
+}
+
+// Small quality-of-life helper so you can pull the oracle out after proving.
+impl<const PENDING: u128, O: Oracle> Transcript<PENDING, O> {
+    pub fn into_oracle(self) -> O { self.oracle }
+}
+
+
 
 // ---------------- Messages & obligations (bitmask) ----------------
 
@@ -113,7 +187,7 @@ impl<const PENDING: u128, O: Oracle> Transcript<PENDING, O> {
 
 // Challenge is only available when PENDING == 0
 impl<O: Oracle> Transcript<0, O> {
-    pub fn challenge<C: Challenge>(mut self, label: &'static str) -> (C, Self) {
+    pub fn challenge<C: Challenge + CanonicalEncode>(mut self, label: &'static str) -> (C, Self) {
         let c = self.oracle.challenge::<C>(label);
         (c, self)
     }
@@ -123,6 +197,35 @@ impl<O: Oracle> Transcript<0, O> {
 pub fn start_round<const PENDING: u128, O: Oracle>(oracle: O) -> Transcript<PENDING, O> {
     Transcript::<PENDING, O>::new(oracle)
 }
+
+// More Helpers
+impl<const PENDING: u128, O: Oracle> Transcript<PENDING, O> {
+    pub fn absorb_bytes(mut self, label: &'static str, bytes: &[u8]) -> Self {
+        self.oracle.absorb_bytes(label, bytes);
+        self
+    }
+
+    pub fn retag<const NEW: u128>(self) -> Transcript<NEW, O> {
+        Transcript { oracle: self.oracle }
+    }
+}
+
+impl<const PENDING: u128, O: Oracle> Transcript<PENDING, O> {
+    /// Move out the inner oracle (rarely needed; prefer `into_events`).
+    pub fn into_inner(self) -> O {
+        self.oracle
+    }
+
+    /// Drain recorded events if the oracle supports it.
+    pub fn into_events(self) -> Vec<RecEvent>
+    where
+        O: IntoEvents,
+    {
+        self.oracle.into_events()
+    }
+}
+
+
 
 // ----------------- Macros -----------------
 
@@ -225,7 +328,7 @@ mod interactive_runtime {
 
     #[cfg(feature = "interactive")]
     impl<C: Channel, R: rand::RngCore> Oracle for InteractiveVerifierOracle<C, R> {
-        fn challenge<T: Challenge>(&mut self, label: &'static str) -> T {
+        fn challenge<T: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> T {
             // Produce pseudorandom bytes (uniform) and send them to prover.
             let mut buf = vec![0u8; T::BYTES];
             // self.rng.fill_bytes(&mut buf);
@@ -263,7 +366,7 @@ mod interactive_runtime {
 
     #[cfg(feature = "interactive")]
     impl<C: Channel> Oracle for InteractiveProverOracle<C> {
-        fn challenge<T: Challenge>(&mut self, expect_label: &'static str) -> T {
+        fn challenge<T: Challenge + CanonicalEncode>(&mut self, expect_label: &'static str) -> T {
             // Block until a challenge frame arrives; check label; derive T.
             let bytes = self.chan.recv().expect("interactive: channel closed");
             let (label, payload) = decode_frame(&bytes).expect("interactive: bad frame");

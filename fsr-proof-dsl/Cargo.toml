@@ -1,0 +1,15 @@
+[package]
+name = "fsr-proof-dsl"
+version = "0.1.0"
+edition = "2021"
+description = "Style-B proof DSL for fsr-core: proof!{ ... }"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+fsr-bind-derive = { path = "../fsr-bind-derive" }
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
