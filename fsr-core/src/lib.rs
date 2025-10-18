@@ -5,6 +5,18 @@
 // users can write #[derive(fsr_core::bind_derive::Bindable)]
 pub use fsr_bind_derive::FsrBindable;
 
+// Additional modules
+pub mod runtime;      // TranscriptRuntime + RandomOracle
+pub mod fs_runtime;   // FS (Fiat–Shamir) oracle
+pub mod fischlin;     // Fischlin oracle + params
+pub mod fischlin_proof; // Fischlin proof encoding + verify helpers
+
+pub use runtime::{TranscriptRuntime, RandomOracle};
+pub use fs_runtime::FSOracle;
+pub use fischlin::{FischlinOracle, FischlinParams};
+pub use fischlin_proof::{FischlinProof, verify_fischlin};
+
+
 // ---------------- Canonical encoding & absorption ----------------
 
 pub trait CanonicalEncode {
@@ -73,6 +85,37 @@ impl Oracle for HashOracle {
         material.extend_from_slice(label.as_bytes());
         material.extend_from_slice(&self.buf);
         C::from_oracle_bytes(label, &material)
+    }
+}
+
+
+impl RandomOracle for HashOracle {
+    fn H_full(&mut self, label: &'static str, data: &[u8]) -> Vec<u8> {
+        use core::hash::{Hash, Hasher};
+        // domain-separated material: domain || label || transcript_buf || data
+        let mut material =
+            Vec::with_capacity(self.domain.len() + label.len() + self.buf.len() + data.len());
+        material.extend_from_slice(self.domain);
+        material.extend_from_slice(label.as_bytes());
+        material.extend_from_slice(&self.buf);
+        material.extend_from_slice(data);
+
+        // Expand to 32 bytes deterministically (same spirit as your Challenge impl)
+        let mut s = std::collections::hash_map::DefaultHasher::new();
+        material.hash(&mut s);
+        let mut seed = s.finish();
+
+        let mut out = Vec::with_capacity(32);
+        for _ in 0..4 {
+            out.extend_from_slice(&seed.to_le_bytes());
+            seed = seed.rotate_left(17) ^ 0x9E37_79B9_7F4A_7C15u64;
+        }
+        out
+    }
+
+    fn H(&mut self, label: &'static str, data: &[u8]) -> Vec<u8> {
+        // For our purposes Hb can reuse the same compression and be truncated later.
+        self.H_full(label, data)
     }
 }
 

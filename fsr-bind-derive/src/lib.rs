@@ -2,8 +2,9 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Fields, LitInt, LitStr, Path, DataStruct, 
+    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Fields, LitInt, LitStr, Path, DataStruct, ItemFn, Macro
 };
+use syn::visit::{self, Visit};
 
 /// We purposely name the derive macro **FsrBindable** to avoid any name collision
 /// with the runtime trait `fsr_core::Bindable`.
@@ -245,3 +246,69 @@ fn parse_field_cfg(attrs: &[Attribute], default_label: &str) -> syn::Result<Fiel
 
     Ok(FieldCfg { include, label, ob_bit })
 }
+
+
+
+
+// -------------------------------------    BARRIER LINT FOR FISCHLIN TRANSFORM    -------------------------------------
+
+
+#[proc_macro_attribute]
+pub fn enforce_fischlin_barrier(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(item as ItemFn);
+    let mut v = BarrierVisitor::default();
+    v.visit_item_fn(&func);
+
+    if v.first_prove_round_pos.is_some()
+        && (v.first_seal_pos.is_none() || v.first_seal_pos > v.first_prove_round_pos)
+    {
+        let msg = "Fischlin: missing `seal_first_messages!()` BEFORE any `fischlin_*prove*round*()`.\n\
+                   Ensure the entire vector of first messages is sealed into the oracle (common_h) \
+                   before starting the e-search.";
+        let err = syn::Error::new_spanned(&func.sig.ident, msg).to_compile_error();
+        return quote!(#err #func).into();
+    }
+
+    quote!(#func).into()
+}
+
+#[derive(Default)]
+struct BarrierVisitor {
+    first_seal_pos: Option<usize>,
+    first_prove_round_pos: Option<usize>,
+    idx: usize,
+}
+
+impl<'ast> Visit<'ast> for BarrierVisitor {
+    fn visit_macro(&mut self, m: &'ast Macro) {
+        // detect macro names like seal_first_messages, fischlin_prove_round, etc.
+        if let Some(ident) = m.path.segments.last().map(|s| s.ident.to_string()) {
+            match ident.as_str() {
+                "seal_first_messages" => {
+                    if self.first_seal_pos.is_none() {
+                        self.first_seal_pos = Some(self.idx);
+                    }
+                }
+                // cover both spellings we used
+                "fischlin_prove_round" | "fischlin_prove_round_stream" | "fischlin_search_round" => {
+                    if self.first_prove_round_pos.is_none() {
+                        self.first_prove_round_pos = Some(self.idx);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.idx += 1;
+
+        // call the default traversal (requires `syn` feature = "visit")
+        visit::visit_macro(self, m);
+    }
+
+    fn visit_item_fn(&mut self, i: &'ast ItemFn) {
+        visit::visit_item_fn(self, i);
+    }
+}
+
+
+
+
