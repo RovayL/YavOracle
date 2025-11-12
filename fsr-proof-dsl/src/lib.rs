@@ -484,7 +484,10 @@ fn expand(spec: ProofSpec) -> TokenStream2 {
                     Some(quote! {
                         {
                             let __lbl: &'static str = #label;
-                            let #prime: #ty = h.challenge::<#ty>(__lbl);
+                            let #prime: #ty = match h.challenge::<#ty>(__lbl) {
+                                ::core::result::Result::Ok(c) => c,
+                                ::core::result::Result::Err(_) => return false,
+                            };
                             let __eq = {
                                 let mut a = ::std::vec::Vec::new(); <#ty as fsr_core::CanonicalEncode>::encode(&#prime, &mut a);
                                 let mut b = ::std::vec::Vec::new(); <#ty as fsr_core::CanonicalEncode>::encode(&#id, &mut b);
@@ -710,7 +713,10 @@ fn expand(spec: ProofSpec) -> TokenStream2 {
                         Some(quote! {
                             {
                                 let __lbl: &'static str = #label;
-                                let #prime: #ty = h.challenge::<#ty>(__lbl);
+                                let #prime: #ty = match h.challenge::<#ty>(__lbl) {
+                                    ::core::result::Result::Ok(c) => c,
+                                    ::core::result::Result::Err(_) => return false,
+                                };
                                 let __eq = {
                                     let mut a = ::std::vec::Vec::new(); <#ty as fsr_core::CanonicalEncode>::encode(&#prime, &mut a);
                                     let mut b = ::std::vec::Vec::new(); <#ty as fsr_core::CanonicalEncode>::encode(&#id, &mut b);

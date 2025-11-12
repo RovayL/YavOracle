@@ -122,7 +122,7 @@ proof! {
     check {
       let lhs = pub_in.g.smul(z1);
       let rhs = t1.add(pub_in.y.smul(e1));
-      Ok(lhs == rhs)
+      lhs == rhs
     }
   }
 
@@ -139,7 +139,7 @@ proof! {
     check {
       let lhs = pub_in.g.smul(z2);
       let rhs = t2.add(pub_in.y.smul(e2));
-      Ok(lhs == rhs)
+      lhs == rhs
     }
   }
 }
