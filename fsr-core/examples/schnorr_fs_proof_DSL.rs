@@ -86,10 +86,10 @@ proof! {
   }
 
   check {
-    let e = h.challenge::<Scalar>("e");
+    let e = h.challenge::<Scalar>("e")?;
     let lhs = pub_in.g.smul(z);
     let rhs = t.add(pub_in.y.smul(e));
-    lhs == rhs
+    Ok(lhs == rhs)
   }
 }
 
@@ -116,7 +116,7 @@ proof! {
     let T: G1 = pub_in.g.smul(z).sub(pub_in.y.smul(e));
     let lhs = pub_in.g.smul(z);
     let rhs = T.add(pub_in.y.smul(e));
-    lhs == rhs
+    Ok(lhs == rhs)
   }
 }
 
@@ -124,7 +124,7 @@ proof! {
 
 fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{:02x}", b)).collect() }
 
-fn main() {
+fn main() -> fsr_core::Result<()> {
     const DST: &[u8] = b"schnorr-toy";
 
     // Prover setup
@@ -143,7 +143,7 @@ fn main() {
 
     // Run boundary
     let tr = tr.absorb::<{ Commit::OBLIG_MASK }, _>(Commit::LABEL, &Commit { t });
-    let (e, tr) = tr.challenge::<Scalar>("e");
+    let (e, tr) = tr.challenge::<Scalar>("e")?;
     let z = r.add(e.mul(x));
     let tr = tr.absorb::<{ Response::OBLIG_MASK }, _>(Response::LABEL, &Response { z });
 
@@ -178,4 +178,5 @@ fn main() {
     let _ = fs::write("verifier_schnorr_optimized.rs", schnorr_optimized_verifier_source());
 
     println!("All verifications passed.");
+    Ok(())
 }

@@ -10,11 +10,28 @@ pub mod runtime;      // TranscriptRuntime + RandomOracle
 pub mod fs_runtime;   // FS (Fiat–Shamir) oracle
 pub mod fischlin;     // Fischlin oracle + params
 pub mod fischlin_proof; // Fischlin proof encoding + verify helpers
+pub mod fs_proof;
 
 pub use runtime::{TranscriptRuntime, RandomOracle};
 pub use fs_runtime::FSOracle;
 pub use fischlin::{FischlinOracle, FischlinParams};
 pub use fischlin_proof::{FischlinProof, verify_fischlin};
+pub use fs_proof::FsProof;
+
+// Qualify of life improvements
+pub mod error;
+pub use error::{ProveError, Result};
+
+// --- Super-trait so FS & Fischlin can be swapped with one bound ---
+pub trait TranscriptOracle: Oracle + Absorb + Clone {}
+impl<T: Oracle + Absorb + Clone> TranscriptOracle for T {}
+
+// Nice alias so users can set a single default in one place if they want.
+pub type DefaultOracle = HashOracle;
+
+// If you like, you can expose a convenience alias that defaults O:
+pub type Tr<const PENDING: u128, O = DefaultOracle> = Transcript<PENDING, O>;
+
 
 
 // ---------------- Canonical encoding & absorption ----------------
@@ -58,10 +75,14 @@ impl Challenge for U64Challenge {
     const BYTES: usize = 32;
 }
 
+impl CanonicalEncode for U64Challenge {
+    fn encode(&self, out: &mut Vec<u8>) { self.0.encode(out); }
+}
+
 // ---------------- Oracle abstraction (FS or interactive) ----------------
 
 pub trait Oracle: Absorb {
-    fn challenge<C: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> C;
+    fn challenge<C: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> Result<C>;
 }
 
 pub struct HashOracle {
@@ -79,12 +100,12 @@ impl Absorb for HashOracle {
     }
 }
 impl Oracle for HashOracle {
-    fn challenge<C: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> C {
+    fn challenge<C: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> Result<C> {
         let mut material = Vec::with_capacity(self.buf.len() + label.len() + self.domain.len());
         material.extend_from_slice(self.domain);
         material.extend_from_slice(label.as_bytes());
         material.extend_from_slice(&self.buf);
-        C::from_oracle_bytes(label, &material)
+        Ok(C::from_oracle_bytes(label, &material))
     }
 }
 
@@ -170,15 +191,12 @@ impl<H: Absorb> Absorb for RecordingHashOracle<H> {
 }
 
 impl<H: Oracle> Oracle for RecordingHashOracle<H> {
-    fn challenge<C: Challenge>(&mut self, label: &'static str) -> C
-    where
-        C: Challenge + CanonicalEncode, // we need to encode C to record it
-    {
-        let c = self.inner.challenge::<C>(label);
+    fn challenge<C: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> Result<C> {
+        let c = self.inner.challenge::<C>(label)?;
         let mut v = Vec::new();
         c.encode(&mut v);
         self.events.push(RecEvent::Challenge { label, bytes: v });
-        c
+        Ok(c)
     }
 }
 
@@ -230,9 +248,12 @@ impl<const PENDING: u128, O: Oracle> Transcript<PENDING, O> {
 
 // Challenge is only available when PENDING == 0
 impl<O: Oracle> Transcript<0, O> {
-    pub fn challenge<C: Challenge + CanonicalEncode>(mut self, label: &'static str) -> (C, Self) {
-        let c = self.oracle.challenge::<C>(label);
-        (c, self)
+    pub fn challenge<C: Challenge + CanonicalEncode>(
+        mut self,
+        label: &'static str,
+    ) -> Result<(C, Self)> {
+        let c = self.oracle.challenge::<C>(label)?;
+        Ok((c, self))
     }
 }
 
@@ -293,7 +314,7 @@ macro_rules! declare_round {
 // ======== Interactive runtime (feature-gated) ========
 #[cfg(feature = "interactive")]
 mod interactive_runtime {
-    use super::{Absorb, Challenge, Oracle};
+    use super::{Absorb, Challenge, Oracle, ProveError, Result};
 
     // --- Transport abstraction ---
     pub trait Channel: Send + 'static {
@@ -371,7 +392,7 @@ mod interactive_runtime {
 
     #[cfg(feature = "interactive")]
     impl<C: Channel, R: rand::RngCore> Oracle for InteractiveVerifierOracle<C, R> {
-        fn challenge<T: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> T {
+        fn challenge<T: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> Result<T> {
             // Produce pseudorandom bytes (uniform) and send them to prover.
             let mut buf = vec![0u8; T::BYTES];
             // self.rng.fill_bytes(&mut buf);
@@ -381,7 +402,7 @@ mod interactive_runtime {
             let frame = encode_frame(label, &buf);
             self.chan.send(frame);
             self.draw_ctr = self.draw_ctr.wrapping_add(1);
-            T::from_oracle_bytes(label, &buf)
+            Ok(T::from_oracle_bytes(label, &buf))
         }
     }
 
@@ -409,13 +430,19 @@ mod interactive_runtime {
 
     #[cfg(feature = "interactive")]
     impl<C: Channel> Oracle for InteractiveProverOracle<C> {
-        fn challenge<T: Challenge + CanonicalEncode>(&mut self, expect_label: &'static str) -> T {
+        fn challenge<T: Challenge + CanonicalEncode>(&mut self, expect_label: &'static str) -> Result<T> {
             // Block until a challenge frame arrives; check label; derive T.
-            let bytes = self.chan.recv().expect("interactive: channel closed");
-            let (label, payload) = decode_frame(&bytes).expect("interactive: bad frame");
-            assert_eq!(label, expect_label, "interactive: label mismatch");
+            let bytes = self
+                .chan
+                .recv()
+                .ok_or(ProveError::Malformed("interactive: channel closed"))?;
+            let (label, payload) =
+                decode_frame(&bytes).ok_or(ProveError::Malformed("interactive: bad frame"))?;
+            if label != expect_label {
+                return Err(ProveError::Malformed("interactive: label mismatch"));
+            }
             self.recv_ctr = self.recv_ctr.wrapping_add(1);
-            T::from_oracle_bytes(label, payload)
+            Ok(T::from_oracle_bytes(label, payload))
         }
     }
 }
@@ -423,4 +450,3 @@ mod interactive_runtime {
 // Publicly re-export when the feature is on.
 #[cfg(feature = "interactive")]
 pub use interactive_runtime::*;
-

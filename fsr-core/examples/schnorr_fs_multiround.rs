@@ -81,11 +81,11 @@ impl fsr_core::Absorb for RecordingOracle<HashOracle> {
 
 // Implement Oracle (challenge) and also record the challenge bytes
 impl fsr_core::Oracle for RecordingOracle<HashOracle> {
-    fn challenge<C: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> C {
-        let c: C = self.inner.challenge(label);
+    fn challenge<C: Challenge + CanonicalEncode>(&mut self, label: &'static str) -> fsr_core::Result<C> {
+        let c: C = self.inner.challenge(label)?;
         let mut buf = Vec::new(); <C as CanonicalEncode>::encode(&c, &mut buf);
         self.events.push(RecEvent::Challenge { label, bytes: buf });
-        c
+        Ok(c)
     }
 }
 
@@ -122,7 +122,7 @@ proof! {
     check {
       let lhs = pub_in.g.smul(z1);
       let rhs = t1.add(pub_in.y.smul(e1));
-      lhs == rhs
+      Ok(lhs == rhs)
     }
   }
 
@@ -139,12 +139,12 @@ proof! {
     check {
       let lhs = pub_in.g.smul(z2);
       let rhs = t2.add(pub_in.y.smul(e2));
-      lhs == rhs
+      Ok(lhs == rhs)
     }
   }
 }
 
-fn main() {
+fn main() -> fsr_core::Result<()> {
     // secret/public
     let x = Scalar(0x23);
     let g = G1(7);
@@ -168,7 +168,7 @@ fn main() {
         .absorb_bytes(Commit::MSG_LABEL, &[]);
 
     // challenge and response
-    let (e1, tr1c) = tr1.challenge::<Scalar>("e1");
+    let (e1, tr1c) = tr1.challenge::<Scalar>("e1")?;
     let z1 = Scalar(r1.0.wrapping_add(e1.0.wrapping_mul(x.0)));
 
     // absorb response
@@ -184,7 +184,7 @@ fn main() {
         .absorb::<{ Commit::OBLIG_MASK }, _>(Commit::LABEL, &commit2)
         .absorb_bytes(Commit::MSG_LABEL, &[]);
 
-    let (e2, tr2c) = tr2.challenge::<Scalar>("e2");
+    let (e2, tr2c) = tr2.challenge::<Scalar>("e2")?;
     let z2 = Scalar(r2.0.wrapping_add(e2.0.wrapping_mul(x.0)));
     let tr_done = tr2c.absorb::<{ Response::OBLIG_MASK }, _>(Response::LABEL, &Response { z: z2 });
 
@@ -201,4 +201,5 @@ fn main() {
     // Output the proof bytes as well as the verifier code
     println!("multi-round proof bytes ({}): 0x{}", bytes.len(), hex::encode(bytes));
     println!("--- SchnorrTwo verifier ---\n{}\n", schnorr_two_verifier_source());
+    Ok(())
 }

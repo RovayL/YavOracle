@@ -14,7 +14,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
 }
 
-fn main() {
+fn main() -> fsr_core::Result<()> {
     // ------------------- Toy additive group Z_p -------------------
     const MOD_P: u64 = 2_147_483_647; // 2^31 - 1
 
@@ -88,7 +88,7 @@ fn main() {
 
     // run the boundary
     let tr = tr.absorb::<{ Commit::OBLIG_MASK }, _>(Commit::LABEL, &Commit { T });
-    let (e, tr) = tr.challenge::<Scalar>("e");
+    let (e, tr) = tr.challenge::<Scalar>("e")?;
     let z = r.add(e.mul(x));
     let tr = tr.absorb::<{ Response::OBLIG_MASK }, _>(Response::LABEL, &Response { z });
 
@@ -151,7 +151,10 @@ fn main() {
         // 2) Message-sentinel binding that Transcript::absorb() adds:
         h.absorb_bytes("Commit", &[]);
 
-        let e_prime = h.challenge::<Scalar>("e");
+        let e_prime = match h.challenge::<Scalar>("e") {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         // Algebraic check: z·G ?= T + e'·Y
         let lhs = G.smul(z);
@@ -181,7 +184,10 @@ fn main() {
         // 2) …and the message-sentinel:
         h.absorb_bytes("Commit", &[]);
 
-        let e_prime = h.challenge::<Scalar>("e");
+        let e_prime = match h.challenge::<Scalar>("e") {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
 
         // FS consistency check:
         if e_prime != e { return false; }
@@ -194,4 +200,5 @@ fn main() {
 
     println!("verify_naive:     {}", verify_naive(&proof_naive));
     println!("verify_optimized: {}", verify_optimized(&proof_opt));
+    Ok(())
 }

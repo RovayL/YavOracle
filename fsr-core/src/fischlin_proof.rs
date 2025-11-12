@@ -14,6 +14,67 @@ impl FischlinProof {
     pub fn is_well_formed(&self) -> bool {
         self.m.len() == self.e.len() && self.e.len() == self.z.len() && self.m.len() == self.rho as usize
     }
+
+    /// Simple byte encoding for demo/debugging purposes.
+    pub fn encode(&self) -> Vec<u8> {
+        fn push_list(dst: &mut Vec<u8>, list: &[Vec<u8>]) {
+            dst.extend_from_slice(&(list.len() as u32).to_le_bytes());
+            for item in list {
+                dst.extend_from_slice(&(item.len() as u32).to_le_bytes());
+                dst.extend_from_slice(item);
+            }
+        }
+
+        const TAG: &[u8] = b"FISCHLIN\0";
+        let mut out = Vec::new();
+        out.extend_from_slice(TAG);
+        out.extend_from_slice(&self.rho.to_le_bytes());
+        out.push(self.b);
+        push_list(&mut out, &self.m);
+        push_list(&mut out, &self.e);
+        push_list(&mut out, &self.z);
+        out
+    }
+
+    /// Decode the format emitted by `encode`.
+    pub fn decode(mut input: &[u8]) -> Option<Self> {
+        fn read_list(input: &mut &[u8]) -> Option<Vec<Vec<u8>>> {
+            if input.len() < 4 { return None; }
+            let mut len_bytes = [0u8; 4];
+            len_bytes.copy_from_slice(&input[..4]);
+            let count = u32::from_le_bytes(len_bytes) as usize;
+            *input = &input[4..];
+            let mut out = Vec::with_capacity(count);
+            for _ in 0..count {
+                if input.len() < 4 { return None; }
+                let mut lbytes = [0u8; 4];
+                lbytes.copy_from_slice(&input[..4]);
+                let len = u32::from_le_bytes(lbytes) as usize;
+                *input = &input[4..];
+                if input.len() < len { return None; }
+                out.push(input[..len].to_vec());
+                *input = &input[len..];
+            }
+            Some(out)
+        }
+
+        const TAG: &[u8] = b"FISCHLIN\0";
+        if input.len() < TAG.len() + 2 + 1 { return None; }
+        if &input[..TAG.len()] != TAG { return None; }
+        input = &input[TAG.len()..];
+
+        let mut rho_bytes = [0u8; 2];
+        rho_bytes.copy_from_slice(&input[..2]);
+        let rho = u16::from_le_bytes(rho_bytes);
+        input = &input[2..];
+
+        let b = *input.get(0)?; input = &input[1..];
+        let m = read_list(&mut input)?;
+        let e = read_list(&mut input)?;
+        let z = read_list(&mut input)?;
+
+        Some(Self { m, e, z, b, rho })
+    }
 }
 
 pub fn verify_fischlin<RO, SigmaV>(
@@ -34,8 +95,14 @@ where
 
     let mut oracle = FischlinOracle::new(ro, params);
     oracle.begin_verifier(x_bytes, sid);
-    for m_i in &proof.m { oracle.push_first_message_verifier(m_i); }
-    oracle.verifier_finalize_common_h();
+    for m_i in &proof.m {
+        if oracle.push_first_message_verifier(m_i).is_err() {
+            return false;
+        }
+    }
+    if oracle.verifier_finalize_common_h().is_err() {
+        return false;
+    }
 
     for i in 0..proof.m.len() {
         let (m_i, e_i, z_i) = (&proof.m[i], &proof.e[i], &proof.z[i]);
@@ -43,7 +110,10 @@ where
         if !ok_sigma { return false; }
 
         // precompute prefix once for this i
-        let prefix = oracle.predicate_prefix(i as u32);
+        let prefix = match oracle.predicate_prefix(i as u32) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
         if !oracle.hb_zero_from_prefix(&prefix, e_i, z_i) { return false; }
     }
     true

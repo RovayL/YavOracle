@@ -2,7 +2,7 @@ use fsr_core::*;
 use fsr_bind_derive::FsrBindable;
 
 #[cfg(feature = "interactive")]
-fn main() {
+fn main() -> fsr_core::Result<()> {
     use rand::{rngs::StdRng, SeedableRng};
 
     // ------------------- Toy additive group Z_p -------------------
@@ -113,8 +113,8 @@ fn main() {
     let tr_p = tr_p.absorb::<{ Commit::OBLIG_MASK }, _>(Commit::LABEL, &commit);
 
     // ------------------- Challenge -------------------
-    let (e_v, tr_v) = tr_v.challenge::<Scalar>("e");
-    let (e_p, tr_p) = tr_p.challenge::<Scalar>("e");
+    let (e_v, tr_v) = tr_v.challenge::<Scalar>("e")?;
+    let (e_p, tr_p) = tr_p.challenge::<Scalar>("e")?;
     assert_eq!(e_v.0, e_p.0, "prover and verifier must see the same e");
     let e = e_v;
 
@@ -140,6 +140,7 @@ fn main() {
     println!("  z = r + e*x (mod p) = {}", z.0);
     println!("  Check: z*G = {}  vs  T + e*Y = {}  -> {}", lhs.0, rhs.0, ok);
     assert!(ok, "verification failed in toy group");
+    Ok(())
 }
 
 #[cfg(not(feature = "interactive"))]

@@ -69,7 +69,7 @@ proof! {
     check {
       let lhs = pub_in.g.smul(z1);
       let rhs = t1.add(pub_in.y.smul(e1));
-      lhs == rhs
+      Ok(lhs == rhs)
     }
   }
 
@@ -86,14 +86,14 @@ proof! {
     check {
       let lhs = pub_in.g.smul(z2);
       let rhs = t2.add(pub_in.y.smul(e2));
-      lhs == rhs
+      Ok(lhs == rhs)
     }
   }
 }
 
 fn le_u64(x: u64) -> [u8;8] { x.to_le_bytes() }
 
-fn main() {
+fn main() -> fsr_core::Result<()> {
     // secret/public
     let x = Scalar(0x23);
     let g = G1(7);
@@ -107,7 +107,7 @@ fn main() {
     // R1
     h.absorb_bytes(Commit::LABEL_t, &le_u64(t1.0));
     h.absorb_bytes(Commit::MSG_LABEL, &[]);
-    let e1: Scalar = h.challenge("e1");
+    let e1: Scalar = h.challenge("e1")?;
     let z1 = Scalar(r1.0.wrapping_add(e1.0.wrapping_mul(x.0)));
 
     // R2
@@ -115,7 +115,7 @@ fn main() {
     let t2 = g.smul(r2);
     h.absorb_bytes(Commit::LABEL_t, &le_u64(t2.0));
     h.absorb_bytes(Commit::MSG_LABEL, &[]);
-    let e2: Scalar = h.challenge("e2");
+    let e2: Scalar = h.challenge("e2")?;
     let z2 = Scalar(r2.0.wrapping_add(e2.0.wrapping_mul(x.0)));
 
     // record the transcript events in order
@@ -146,4 +146,5 @@ fn main() {
 
     // print the verifier source
     println!("--- Schnorr_two verifier ---\n{}\n", schnorr_two_verifier_source());
+    Ok(())
 }

@@ -1,11 +1,7 @@
 //! Minimal Schnorr + Fischlin using the DSL layer.
 //! This uses the prove!/verify! macros just added for Fischlin.
 
-use fsr_core::{FischlinOracle, FischlinParams, FischlinProof};
-use fsr_core::runtime::RandomOracle;
-// If your repo exposes the real HashOracle adapter, import it here:
-use fsr_core::HashOracle;
-// use fsr_proof_dsl::{prove, verify};     // macros from fsr-proof-dsl
+use fsr_core::{FischlinOracle, FischlinParams, FischlinProof, HashOracle};
 
 // --- Toy group as before (shortened) ---
 const MOD_P: u64 = 2_147_483_647;
@@ -27,7 +23,7 @@ fn schnorr_prover_first(pubc: &Public, r: Scalar) -> FirstMsg { FirstMsg { t: pu
 fn schnorr_prover_second(_pubc: &Public, r: Scalar, e: Scalar, w: Scalar) -> Resp { Resp { z: Scalar((r.0 + (e.0 % ORDER_Q) * (w.0 % ORDER_Q)) % ORDER_Q) } }
 fn schnorr_verify(pubc: &Public, m: &FirstMsg, e: Scalar, z: &Resp) -> bool { pubc.g.pow(z.z) == m.t.mul(pubc.y.pow(e)) }
 
-fn main() {
+fn main() -> fsr_core::Result<()> {
     // Domain
     // const DST: &[u8] = b"YavOracle/FischlinDemo";
 
@@ -52,26 +48,48 @@ fn main() {
     use rand::{RngCore, rngs::StdRng, SeedableRng};
     let mut rng = StdRng::seed_from_u64(42);
 
-    let proof = fsr_proof_dsl::prove! {
+    let proof: FischlinProof = fsr_proof_dsl::prove! {
         transform = "fischlin",
         oracle = oracle,
         rho = rho,
         b = b_bits,                  // <-- pass b explicitly
-        statement = x_bytes,
+        statement = x_bytes.clone(),
         sid = sid,
-        first = |i| {
+        first = |_i| {
             let r_i = Scalar(rng.next_u64() % ORDER_Q);
             let m_i = schnorr_prover_first(&pubc, r_i);
             (enc_u64(m_i.t.0), r_i)
         },
-        respond = |i, e_bytes, r_i: &Scalar| {
+        respond = |_i: usize, e_bytes: &[u8], r_i: &Scalar| {
             let e = Scalar(dec_le_u64(e_bytes) % ORDER_Q);
             let z = schnorr_prover_second(&pubc, *r_i, e, wit.w);
             enc_u64(z.z.0)
         }
-    };
+    }?;
 
     let ok = fsr_proof_dsl::verify! {
+        transform = "fischlin",
+        oracle = FischlinOracle::new(HashOracle::new(b"YavOracle/FischlinDemo"), FischlinParams::new(proof.rho, proof.b)),
+        statement = { let mut v=Vec::new(); v.extend_from_slice(&enc_u64(pubc.g.0)); v.extend_from_slice(&enc_u64(pubc.y.0)); v },
+        sid = sid,
+        proof = &proof,
+        sigma_verify = |_i, m_bytes, e_bytes, z_bytes| {
+            let m = FirstMsg { t: G1(dec_le_u64(m_bytes)) };
+            let e = Scalar(dec_le_u64(e_bytes) % ORDER_Q);
+            let z = Resp { z: Scalar(dec_le_u64(z_bytes) % ORDER_Q) };
+            schnorr_verify(&pubc, &m, e, &z)
+        }
+    };
+
+    println!("DSL Fischlin Schnorr verify = {}", ok);
+    if !ok {
+        return Err(fsr_core::ProveError::Malformed("verification failed"));
+    }
+
+    let proof_bytes = proof.encode();
+    println!("fischlin proof bytes ({}): 0x{}", proof_bytes.len(), hex::encode(&proof_bytes));
+
+    let verifier_src = fsr_proof_dsl::verify_source! {
         transform = "fischlin",
         oracle = FischlinOracle::new(HashOracle::new(b"YavOracle/FischlinDemo"), FischlinParams::new(proof.rho, proof.b)),
         statement = { let mut v=Vec::new(); v.extend_from_slice(&enc_u64(pubc.g.0)); v.extend_from_slice(&enc_u64(pubc.y.0)); v },
@@ -84,7 +102,7 @@ fn main() {
             schnorr_verify(&pubc, &m, e, &z)
         }
     };
+    println!("--- Schnorr Fischlin verifier ---\n{}\n", verifier_src);
 
-    println!("DSL Fischlin Schnorr verify = {}", ok);
-    assert!(ok);
+    Ok(())
 }

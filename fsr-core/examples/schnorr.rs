@@ -65,7 +65,7 @@ impl Message for Response {
 // Pending mask for Round 1 is derived from the message types
 declare_round!(R1 = [Commit]);
 
-fn main() {
+fn main() -> fsr_core::Result<()> {
     let public = Public { g: G1([1; 32]), y: G1([2; 32]) };
 
     // FS oracle for this protocol
@@ -81,7 +81,7 @@ fn main() {
     let tr = tr.absorb::<{ Commit::OBLIG_MASK }, _>(Commit::LABEL, &commit);
 
     // Now challenge is available because pending mask == 0
-    let (e, tr) = tr.challenge::<Scalar>("e");
+    let (e, tr) = tr.challenge::<Scalar>("e")?;
 
     // Prover computes response z (demo)
     let z = Response { z: Scalar(e.0.wrapping_add(7)) };
@@ -94,4 +94,5 @@ fn main() {
     let mut pubbytes = Vec::new();
     public.encode(&mut pubbytes);
     // _tr_done.oracle_mut().absorb_bytes("public", &pubbytes);
+    Ok(())
 }

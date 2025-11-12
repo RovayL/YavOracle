@@ -2,9 +2,8 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2, };
 use quote::{format_ident, quote, quote_spanned};
 use syn::{
-    braced, parse::Parse, parse::ParseStream, parse_macro_input, Expr, Ident, LitBool, LitInt,
+    braced, parse::Parse, parse::ParseStream, parse_macro_input, Expr, ExprClosure, Ident, LitBool, LitInt,
     LitStr, Result, Stmt, Token, Type, Error, ExprLit, ExprPath, Lit, LitByteStr, spanned::Spanned,
-    ExprClosure, 
 };
 
 
@@ -38,12 +37,12 @@ struct ProofSpec {
 }
 
 enum SpecBody {
-    Single {
+    Single {                        // legacy (your current shape)
         fields: Vec<FieldSpec>,
         replay: ReplayBlock,
         check:  CheckBlock,
     },
-    Multi(Vec<RoundSpec>),
+    Multi(Vec<RoundSpec>),          // NEW: multi-round
 }
 
 struct RoundSpec {
@@ -314,9 +313,10 @@ fn expand(spec: ProofSpec) -> TokenStream2 {
     let fn_verify_b    = format_ident!("{}_verify_bytes", snake);
     let fn_src         = format_ident!("{}_verifier_source", snake);
 
-    // header compile-time config (use existing code)
-    // ... (version_u8, include_domain, schema string bytes or the simple header) ...
-    // reuse the #header_encode and #header_decode snippets
+    // header compile-time config (use your existing code)
+    // ... (version_u8, include_domain, schema string bytes or your simple header) ...
+    // reuse your #header_encode and #header_decode snippets
+    // (omitted here for brevity; keep exactly what’s working for you)
 
     // (helper to build replay emission for a block)
     let emit_replay = |rb: &ReplayBlock| -> Vec<TokenStream2> {
@@ -491,7 +491,7 @@ fn expand(spec: ProofSpec) -> TokenStream2 {
                                 a == b
                             };
                             if !__eq { return false; }
-                            // shadow with the re-derived value if one wants to use `id` later
+                            // shadow with the re-derived value if you want to use `id` later
                             let #id: #ty = #prime;
                         }
                     })
@@ -859,30 +859,7 @@ fn to_snake(name: &str) -> Ident {
 }
 
 
-// === Fischlin DSL as function-like proc macros ==================================
-//
-// Syntax (prover):
-// prove! {
-//   transform = "fischlin",
-//   oracle    = <expr>,                // e.g., FischlinOracle::new(HashOracle::new(...), FischlinParams::new(rho,b))
-//   rho       = <expr>,                // u16
-//   b         = <expr>,                // u8
-//   statement = <expr>,                // &[u8]-like expr (will be taken by reference)
-//   sid       = <expr>,                // &[u8]-like expr (will be taken by reference)
-//   first     = |i| { /* -> (m_bytes: Vec<u8>, sigma_i: T) */ },
-//   respond   = |i, e_bytes, sigma_i| { /* -> z_bytes: Vec<u8> */ }
-// }
-//
-// Syntax (verifier):
-// verify! {
-//   transform    = "fischlin",
-//   oracle       = <expr>,             // FischlinOracle with params matching the proof header
-//   statement    = <expr>,
-//   sid          = <expr>,
-//   proof        = <expr>,             // &FischlinProof
-//   sigma_verify = |i, m_i, e_i, z_i| { /* -> bool */ }
-// }
-
+// === Fischlin prover/verifier macros ========================================
 
 struct ProveArgs {
     transform: Option<String>,
@@ -897,97 +874,111 @@ struct ProveArgs {
 
 impl Parse for ProveArgs {
     fn parse(input: ParseStream) -> Result<Self> {
-        let mut transform: Option<String> = None;
-        let (mut oracle, mut rho, mut b, mut statement, mut sid): (Option<Expr>,_,_,_,_) = (None,None,None,None,None);
-        let (mut first, mut respond): (Option<ExprClosure>, Option<ExprClosure>) = (None,None);
-
+        let mut transform = None;
+        let mut oracle = None;
+        let mut rho = None;
+        let mut b = None;
+        let mut statement = None;
+        let mut sid = None;
+        let mut first = None;
+        let mut respond = None;
         while !input.is_empty() {
-            let ident: syn::Ident = input.parse()?;
+            let ident: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
             let key = ident.to_string();
             match key.as_str() {
-                "transform" => { let s: LitStr = input.parse()?; transform = Some(s.value()); }
-                "oracle"    => oracle    = Some(input.parse()?),
-                "rho"       => rho       = Some(input.parse()?),
-                "b"         => b         = Some(input.parse()?),
+                "transform" => {
+                    let lit: LitStr = input.parse()?;
+                    transform = Some(lit.value());
+                }
+                "oracle" => oracle = Some(input.parse()?),
+                "rho" => rho = Some(input.parse()?),
+                "b" => b = Some(input.parse()?),
                 "statement" => statement = Some(input.parse()?),
-                "sid"       => sid       = Some(input.parse()?),
-                "first"     => first     = Some(input.parse()?),
-                "respond"   => respond   = Some(input.parse()?),
-                _ => return Err(syn::Error::new(ident.span(), format!("unknown key `{}`", key))),
+                "sid" => sid = Some(input.parse()?),
+                "first" => first = Some(input.parse()?),
+                "respond" => respond = Some(input.parse()?),
+                "respond_stream" => return Err(Error::new(ident.span(), "`respond_stream` is not supported in this macro")),
+                other => return Err(Error::new(ident.span(), format!("unknown key `{other}`"))),
             }
             let _ = input.parse::<Token![,]>();
         }
 
         Ok(ProveArgs {
             transform,
-            oracle:    oracle.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `oracle`"))?,
-            rho:       rho.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `rho`"))?,
-            b:         b.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `b`"))?,
-            statement: statement.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `statement`"))?,
-            sid:       sid.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `sid`"))?,
-            first:     first.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `first`"))?,
-            respond:   respond.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `respond`"))?,
+            oracle: oracle.ok_or_else(|| Error::new(Span::call_site(), "missing `oracle`"))?,
+            rho: rho.ok_or_else(|| Error::new(Span::call_site(), "missing `rho`"))?,
+            b: b.ok_or_else(|| Error::new(Span::call_site(), "missing `b`"))?,
+            statement: statement.ok_or_else(|| Error::new(Span::call_site(), "missing `statement`"))?,
+            sid: sid.ok_or_else(|| Error::new(Span::call_site(), "missing `sid`"))?,
+            first: first.ok_or_else(|| Error::new(Span::call_site(), "missing `first`"))?,
+            respond: respond.ok_or_else(|| Error::new(Span::call_site(), "missing `respond`"))?,
         })
     }
 }
 
-#[proc_macro]
-pub fn prove(input: TokenStream) -> TokenStream {
-    let args = syn::parse_macro_input!(input as ProveArgs);
-    // ... transform check elided ...
-    let ProveArgs { oracle, rho, b, statement, sid, first, respond, .. } = args;
-
-    let ts = quote::quote!({
+fn expand_prove_fischlin(args: ProveArgs) -> TokenStream2 {
+    let ProveArgs {
+        oracle,
+        rho,
+        b,
+        statement,
+        sid,
+        first,
+        respond,
+        ..
+    } = args;
+    quote!({
         use fsr_core::FischlinProof;
+        let __result: fsr_core::Result<FischlinProof> = (|| {
+            let mut __oracle = #oracle;
+            let __rho_u16: u16 = (#rho);
+            let mut __first = (#first);
+            let mut __respond = (#respond);
+            let __stmt_owned = (#statement);
+            let __sid_owned = (#sid);
+            let __stmt: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__stmt_owned);
+            let __sid: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__sid_owned);
 
-        // Make a local, mutable oracle
-        let mut __oracle = #oracle;
+            __oracle.begin(__stmt, __sid);
 
-        // Own inputs first (so temporaries live long enough), then coerce to &[u8]
-        let __stmt_owned = (#statement);
-        let __sid_owned  = (#sid);
-        let __stmt: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__stmt_owned);
-        let __sidb: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__sid_owned);
+            let mut __first_msgs = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
+            let mut __sigmas = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
+            for __i in 0..(__rho_u16 as usize) {
+                let (__m_bytes, __sigma) = __first(__i);
+                __oracle.push_first_message(&__m_bytes)?;
+                __first_msgs.push(__m_bytes);
+                __sigmas.push(__sigma);
+            }
 
-        // Use only `__oracle` from here on
-        __oracle.begin(__stmt, __sidb);
-        let __rho_u16: u16 = (#rho);
-        let mut __first_msgs: ::std::vec::Vec<::std::vec::Vec<u8>> = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
-        let mut __sigmas:     ::std::vec::Vec<_>                    = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
+            __oracle.seal_first_messages()?;
 
-        let mut __first = (#first);
-        for __i in 0..(__rho_u16 as usize) {
-            let (__m_bytes, __sigma) = __first(__i);
-            __oracle.push_first_message(&__m_bytes);
-            __first_msgs.push(__m_bytes);
-            __sigmas.push(__sigma);
-        }
+            let mut __e_vec = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
+            let mut __z_vec = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
 
-        // Seal (computes common_h)
-        __oracle.seal_first_messages();
+            for __i in 0..(__rho_u16 as usize) {
+                let (__e_out, __z_out) = __oracle.search_round(__i as u32, |__e_try: &[u8]| -> ::std::vec::Vec<u8> {
+                    __respond(__i, __e_try, &__sigmas[__i])
+                })?;
+                __e_vec.push(__e_out);
+                __z_vec.push(__z_out);
+            }
 
-        // For each repetition, search. Note: closure param is __e_try; outputs are __e_out/__z_out.
-        let mut __e_vec: ::std::vec::Vec<::std::vec::Vec<u8>> = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
-        let mut __z_vec: ::std::vec::Vec<::std::vec::Vec<u8>> = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
-
-        for __i in 0..(__rho_u16 as usize) {
-            let __hit = __oracle.search_round(__i as u32, |__e_try: &[u8]| -> ::std::vec::Vec<u8> {
-                // Inline the user-provided closure here to keep the borrow inside this closure
-                ( #respond )(__i, __e_try, &__sigmas[__i])
-            });
-            let (__e_out, __z_out) = __hit.expect("Fischlin: retry required; wrap prove!(...) in a loop");
-            __e_vec.push(__e_out);
-            __z_vec.push(__z_out);
-        }
-
-        FischlinProof { m: __first_msgs, e: __e_vec, z: __z_vec, b: (#b), rho: (#rho) }
-    });
-    ts.into()
+            Ok(FischlinProof { m: __first_msgs, e: __e_vec, z: __z_vec, b: (#b), rho: (#rho) })
+        })();
+        __result
+    })
 }
 
-
-// ---- verifier ----
+#[proc_macro]
+pub fn prove(input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(input as ProveArgs);
+    let transform = args.transform.clone().unwrap_or_else(|| "fischlin".to_string());
+    match transform.as_str() {
+        "fischlin" => expand_prove_fischlin(args).into(),
+        other => Error::new(Span::call_site(), format!("unknown transform `{other}`")).to_compile_error().into(),
+    }
+}
 
 struct VerifyArgs {
     transform: Option<String>,
@@ -1000,48 +991,51 @@ struct VerifyArgs {
 
 impl Parse for VerifyArgs {
     fn parse(input: ParseStream) -> Result<Self> {
-        let mut transform: Option<String> = None;
-        let (mut oracle, mut statement, mut sid, mut proof): (Option<Expr>,_,_,_) = (None,None,None,None);
-        let mut sigma_verify: Option<ExprClosure> = None;
+        let mut transform = None;
+        let mut oracle = None;
+        let mut statement = None;
+        let mut sid = None;
+        let mut proof = None;
+        let mut sigma_verify = None;
 
         while !input.is_empty() {
-            let ident: syn::Ident = input.parse()?;
+            let ident: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
             let key = ident.to_string();
             match key.as_str() {
-                "transform"    => { let s: LitStr = input.parse()?; transform = Some(s.value()); }
-                "oracle"       => oracle       = Some(input.parse()?),
-                "statement"    => statement    = Some(input.parse()?),
-                "sid"          => sid          = Some(input.parse()?),
-                "proof"        => proof        = Some(input.parse()?),
+                "transform" => {
+                    let lit: LitStr = input.parse()?;
+                    transform = Some(lit.value());
+                }
+                "oracle" => oracle = Some(input.parse()?),
+                "statement" => statement = Some(input.parse()?),
+                "sid" => sid = Some(input.parse()?),
+                "proof" => proof = Some(input.parse()?),
                 "sigma_verify" => sigma_verify = Some(input.parse()?),
-                _ => return Err(syn::Error::new(ident.span(), format!("unknown key `{}`", key))),
+                other => return Err(Error::new(ident.span(), format!("unknown key `{other}`"))),
             }
             let _ = input.parse::<Token![,]>();
         }
 
         Ok(VerifyArgs {
             transform,
-            oracle: oracle.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `oracle`"))?,
-            statement: statement.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `statement`"))?,
-            sid: sid.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `sid`"))?,
-            proof: proof.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `proof`"))?,
-            sigma_verify: sigma_verify.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(), "missing `sigma_verify`"))?,
+            oracle: oracle.ok_or_else(|| Error::new(Span::call_site(), "missing `oracle`"))?,
+            statement: statement.ok_or_else(|| Error::new(Span::call_site(), "missing `statement`"))?,
+            sid: sid.ok_or_else(|| Error::new(Span::call_site(), "missing `sid`"))?,
+            proof: proof.ok_or_else(|| Error::new(Span::call_site(), "missing `proof`"))?,
+            sigma_verify: sigma_verify.ok_or_else(|| Error::new(Span::call_site(), "missing `sigma_verify`"))?,
         })
     }
 }
 
-#[proc_macro]
-pub fn verify(input: TokenStream) -> TokenStream {
-    let args = syn::parse_macro_input!(input as VerifyArgs);
-    // ... transform check elided ...
+fn expand_verify_fischlin(args: VerifyArgs) -> TokenStream2 {
     let oracle = args.oracle;
     let statement = args.statement;
     let sid = args.sid;
     let proof = args.proof;
     let sigma_verify = args.sigma_verify;
 
-    let ts = quote::quote!({
+    quote!({
         let mut __oracle = #oracle;
         let __proof = #proof;
 
@@ -1052,31 +1046,64 @@ pub fn verify(input: TokenStream) -> TokenStream {
 
         __oracle.begin_verifier(__stmt, __sidb);
 
-
         if __proof.m.len() != __proof.e.len() || __proof.e.len() != __proof.z.len() {
             false
         } else {
-            
-            for __m in &__proof.m { __oracle.push_first_message_verifier(__m); }
-            __oracle.verifier_finalize_common_h();
-
-            let __check = #sigma_verify;
-            let mut __ok_all = true;
-            for __i in 0..__proof.m.len() {
-                if !__check(__i, &__proof.m[__i], &__proof.e[__i], &__proof.z[__i]) {
-                    __ok_all = false; break;
-                }
-                let __prefix = __oracle.predicate_prefix(__i as u32);
-                if !__oracle.hb_zero_from_prefix(&__prefix, &__proof.e[__i], &__proof.z[__i]) {
-                    __ok_all = false; break;
+            let mut __setup_ok = true;
+            for __m in &__proof.m {
+                if __oracle.push_first_message_verifier(__m).is_err() {
+                    __setup_ok = false;
+                    break;
                 }
             }
-            __ok_all
+            if __setup_ok {
+                if __oracle.verifier_finalize_common_h().is_err() {
+                    __setup_ok = false;
+                }
+            }
+
+            if !__setup_ok {
+                false
+            } else {
+                let __check = #sigma_verify;
+                let mut __ok_all = true;
+                for __i in 0..__proof.m.len() {
+                    if !__check(__i, &__proof.m[__i], &__proof.e[__i], &__proof.z[__i]) {
+                        __ok_all = false;
+                        break;
+                    }
+                    let __prefix = match __oracle.predicate_prefix(__i as u32) {
+                        Ok(p) => p,
+                        Err(_) => {
+                            __ok_all = false;
+                            break;
+                        }
+                    };
+                    if !__oracle.hb_zero_from_prefix(&__prefix, &__proof.e[__i], &__proof.z[__i]) {
+                        __ok_all = false;
+                        break;
+                    }
+                }
+                __ok_all
+            }
         }
-    });
-    ts.into()
+    })
 }
 
+#[proc_macro]
+pub fn verify(input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(input as VerifyArgs);
+    let transform = args.transform.clone().unwrap_or_else(|| "fischlin".to_string());
+    match transform.as_str() {
+        "fischlin" => expand_verify_fischlin(args).into(),
+        other => Error::new(Span::call_site(), format!("unknown transform `{other}`")).to_compile_error().into(),
+    }
+}
 
-
-
+#[proc_macro]
+pub fn verify_source(input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(input as VerifyArgs);
+    let stream = expand_verify_fischlin(args);
+    let lit = LitStr::new(&stream.to_string(), Span::call_site());
+    quote!(#lit).into()
+}

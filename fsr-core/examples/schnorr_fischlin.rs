@@ -120,7 +120,12 @@ fn schnorr_verify(pubc: &Public, m: &FirstMsg, e: Scalar, z: &Resp) -> bool {
 
 // ---------------- Fischlin proof produce/verify --------------------
 
-fn fischlin_schnorr_prove(pubc: &Public, wit: &Witness, rho: u16, b: u8) -> FischlinProof {
+fn fischlin_schnorr_prove(
+    pubc: &Public,
+    wit: &Witness,
+    rho: u16,
+    b: u8,
+) -> fsr_core::Result<FischlinProof> {
     let params = FischlinParams::new(rho, b);
     let ro = StdRO::default();
     let mut oracle = FischlinOracle::new(ro, params);
@@ -147,12 +152,12 @@ fn fischlin_schnorr_prove(pubc: &Public, wit: &Witness, rho: u16, b: u8) -> Fisc
             let m = schnorr_prover_first(pubc, r);
             let mut enc = Vec::new();
             enc.extend_from_slice(&enc_u64(m.t.0));
-            oracle.push_first_message(&enc);
+            oracle.push_first_message(&enc)?;
             r_vec.push(r);
             m_bytes.push(enc);
         }
 
-        oracle.seal_first_messages();
+        oracle.seal_first_messages()?;
 
         let mut e_bytes_vec: Vec<Vec<u8>> = Vec::with_capacity(rho as usize);
         let mut z_bytes_vec: Vec<Vec<u8>> = Vec::with_capacity(rho as usize);
@@ -172,24 +177,28 @@ fn fischlin_schnorr_prove(pubc: &Public, wit: &Witness, rho: u16, b: u8) -> Fisc
                 out
             };
 
-            if let Some((e_i_bytes, z_i_bytes)) = oracle.search_round_stream(i as u32, next_z) {
-                e_bytes_vec.push(e_i_bytes.clone());
-                z_bytes_vec.push(z_i_bytes.clone());
-                debug_assert!({
-                    let t = G1(dec_le_u64(&m_bytes[i as usize]));
-                    let e_chk = Scalar(dec_le_u64(&e_i_bytes) % ORDER_Q);
-                    let z_chk = Scalar(dec_le_u64(&z_i_bytes) % ORDER_Q);
-                    schnorr_verify(pubc, &FirstMsg { t }, e_chk, &Resp { z: z_chk })
-                });
-            } else {
-                // one repetition failed all tries; restart entire proof with fresh randomness
-                success = false;
-                break;
+            match oracle.search_round_stream(i as u32, next_z) {
+                Ok((e_i_bytes, z_i_bytes)) => {
+                    e_bytes_vec.push(e_i_bytes.clone());
+                    z_bytes_vec.push(z_i_bytes.clone());
+                    debug_assert!({
+                        let t = G1(dec_le_u64(&m_bytes[i as usize]));
+                        let e_chk = Scalar(dec_le_u64(&e_i_bytes) % ORDER_Q);
+                        let z_chk = Scalar(dec_le_u64(&z_i_bytes) % ORDER_Q);
+                        schnorr_verify(pubc, &FirstMsg { t }, e_chk, &Resp { z: z_chk })
+                    });
+                }
+                Err(fsr_core::ProveError::RetryNeeded) => {
+                    // one repetition failed all tries; restart entire proof with fresh randomness
+                    success = false;
+                    break;
+                }
+                Err(e) => return Err(e),
             }
         }
 
         if success {
-            return FischlinProof { m: m_bytes, e: e_bytes_vec, z: z_bytes_vec, b, rho };
+            return Ok(FischlinProof { m: m_bytes, e: e_bytes_vec, z: z_bytes_vec, b, rho });
         }
         // else: loop and try again with fresh m⃗/r⃗
     }
@@ -220,7 +229,7 @@ fn fischlin_schnorr_verify(pubc: &Public, proof: &FischlinProof) -> bool {
     verify_fischlin(ro, params, &x_bytes, sid, proof, sigma_verify)
 }
 
-fn main() {
+fn main() -> fsr_core::Result<()> {
     // Setup Schnorr public/witness
     let g = G1(5);                 // toy base
     let w = Scalar(1234567);       // secret
@@ -231,10 +240,11 @@ fn main() {
     // Produce a Fischlin proof
     let rho = 32;
     let b = 4; // 32*4 = 128-bit core cost
-    let proof = fischlin_schnorr_prove(&pubc, &wit, rho, b);
+    let proof = fischlin_schnorr_prove(&pubc, &wit, rho, b)?;
 
     // Verify
     let ok = fischlin_schnorr_verify(&pubc, &proof);
     println!("Fischlin Schnorr verify = {}", ok);
     assert!(ok);
+    Ok(())
 }

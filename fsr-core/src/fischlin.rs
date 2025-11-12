@@ -2,6 +2,7 @@
 
 use core::marker::PhantomData;
 use crate::runtime::{TranscriptRuntime, RandomOracle, trunc_b_to_u64};
+use crate::{Result, ProveError, TranscriptOracle};
 
 #[derive(Clone, Copy, Debug)]
 pub struct FischlinParams {
@@ -71,17 +72,26 @@ impl<RO: RandomOracle> FischlinOracle<RO> {
         self.absorb("sid", sid);
     }
 
-    pub fn push_first_message(&mut self, m_i: &[u8]) {
-        assert!(matches!(self.phase, Phase::CollectingFirstMsgs));
+    pub fn push_first_message(&mut self, m_i: &[u8]) -> Result<()> {
+        if !matches!(self.phase, Phase::CollectingFirstMsgs) {
+            return Err(ProveError::Malformed("fischlin: push_first_message before begin"));
+        }
         self.m_vec.push(m_i.to_vec());
         self.absorb("m_i", m_i);
+        Ok(())
     }
 
-    pub fn seal_first_messages(&mut self) {
-        assert!(matches!(self.phase, Phase::CollectingFirstMsgs));
-        assert_eq!(self.m_vec.len() as u16, self.params.rho, "m⃗ length != rho");
+    pub fn seal_first_messages(&mut self) -> Result<()> {
+        if !matches!(self.phase, Phase::CollectingFirstMsgs) {
+            return Err(ProveError::Malformed("fischlin: seal called before begin"));
+        }
+        if self.m_vec.len() as u16 != self.params.rho {
+            return Err(ProveError::Malformed("fischlin: m_vec len != rho"));
+        }
         let lhs = (self.params.rho as u32) * (self.params.b as u32);
-        assert!(lhs >= self.params.kappa_c as u32, "Unsound params: rho*b < kappa_c");
+        if lhs < self.params.kappa_c as u32 {
+            return Err(ProveError::UnsoundParams("fischlin: rho*b < kappa_c"));
+        }
 
         let mut buf = Vec::new();
         buf.extend_from_slice(b"mode:FISCHLIN|x|"); buf.extend_from_slice(&self.statement_bytes);
@@ -95,17 +105,22 @@ impl<RO: RandomOracle> FischlinOracle<RO> {
         let ch = self.ro.H_full("fischlin.common", &buf);
         self.common_h = Some(ch);
         self.phase = Phase::Sealed;
+        Ok(())
     }
 
     /// NEW: Build the per-repetition predicate prefix once: "pred|common_h|i=<i>"
-    pub fn predicate_prefix(&self, i: u32) -> Vec<u8> {
-        let common: Vec<u8> = self.common_h.as_ref().expect("common_h missing").clone();
+    pub fn predicate_prefix(&self, i: u32) -> Result<Vec<u8>> {
+        let common = self
+            .common_h
+            .as_ref()
+            .ok_or(ProveError::Malformed("fischlin: common_h missing"))?
+            .clone();
         let mut prefix = Vec::with_capacity(common.len() + 16);
         prefix.extend_from_slice(b"pred|");
         prefix.extend_from_slice(&common);
         prefix.extend_from_slice(b"|i=");
         prefix.extend_from_slice(&i.to_le_bytes());
-        prefix
+        Ok(prefix)
     }
 
     /// NEW: Predicate check using a precomputed prefix; only (e,z) vary.
@@ -129,10 +144,18 @@ impl<RO: RandomOracle> FischlinOracle<RO> {
     }
 
     /// EXISTING: search using gen_z(e) — kept for compatibility.
-    pub fn search_round<F>(&mut self, i: u32, mut gen_z: F) -> Option<(Vec<u8>, Vec<u8>)>
-    where F: FnMut(&[u8]) -> Vec<u8> {
-        assert!(matches!(self.phase, Phase::Sealed), "seal_first_messages must be called first");
-        let common: Vec<u8> = self.common_h.as_ref().expect("common_h missing").clone();
+    pub fn search_round<F>(&mut self, i: u32, mut gen_z: F) -> Result<(Vec<u8>, Vec<u8>)>
+    where
+        F: FnMut(&[u8]) -> Vec<u8>,
+    {
+        if !matches!(self.phase, Phase::Sealed) {
+            return Err(ProveError::Malformed("fischlin: seal_first_messages missing"));
+        }
+        let common = self
+            .common_h
+            .as_ref()
+            .ok_or(ProveError::Malformed("fischlin: common_h missing"))?
+            .clone();
         let t = self.params.t.min(56);
         let bound = 1u64.checked_shl(t as u32).unwrap_or(0);
 
@@ -153,17 +176,25 @@ impl<RO: RandomOracle> FischlinOracle<RO> {
             if self.hb_zero_from_prefix(&prefix, &e_bytes, &z_bytes) {
                 self.absorb("e_i", &e_bytes);
                 self.absorb("z_i", &z_bytes);
-                return Some((e_bytes, z_bytes));
+                return Ok((e_bytes, z_bytes));
             }
         }
-        None
+        Err(ProveError::RetryNeeded)
     }
 
     /// NEW: search using a z-stream (z_0 = r, z_{e+1}= z_e + w), i.e., **one modular add per try**.
-    pub fn search_round_stream<F>(&mut self, i: u32, mut next_z: F) -> Option<(Vec<u8>, Vec<u8>)>
-    where F: FnMut() -> Vec<u8> {
-        assert!(matches!(self.phase, Phase::Sealed), "seal_first_messages must be called first");
-        let common: Vec<u8> = self.common_h.as_ref().expect("common_h missing").clone();
+    pub fn search_round_stream<F>(&mut self, i: u32, mut next_z: F) -> Result<(Vec<u8>, Vec<u8>)>
+    where
+        F: FnMut() -> Vec<u8>,
+    {
+        if !matches!(self.phase, Phase::Sealed) {
+            return Err(ProveError::Malformed("fischlin: seal_first_messages missing"));
+        }
+        let common = self
+            .common_h
+            .as_ref()
+            .ok_or(ProveError::Malformed("fischlin: common_h missing"))?
+            .clone();
         let t = self.params.t.min(56);
         let bound = 1u64.checked_shl(t as u32).unwrap_or(0);
 
@@ -186,10 +217,10 @@ impl<RO: RandomOracle> FischlinOracle<RO> {
             if self.hb_zero_from_prefix(&prefix, &e_bytes, &z_bytes) {
                 self.absorb("e_i", &e_bytes);
                 self.absorb("z_i", &z_bytes);
-                return Some((e_bytes, z_bytes));
+                return Ok((e_bytes, z_bytes));
             }
         }
-        None
+        Err(ProveError::RetryNeeded)
     }
 
     pub fn verify_predicate(&mut self, i: u32, m_i: &[u8], e_i: &[u8], z_i: &[u8]) -> bool {
@@ -210,7 +241,7 @@ impl<RO: RandomOracle> FischlinOracle<RO> {
         self.hb_zero_from_prefix(&prefix, e_i, z_i)
     }
 
-    pub fn verifier_finalize_common_h(&mut self) {
+    pub fn verifier_finalize_common_h(&mut self) -> Result<()> {
         let mut buf = Vec::new();
         buf.extend_from_slice(b"mode:FISCHLIN|x|"); buf.extend_from_slice(&self.statement_bytes);
         buf.extend_from_slice(b"|m_vec|");
@@ -220,6 +251,7 @@ impl<RO: RandomOracle> FischlinOracle<RO> {
         }
         buf.extend_from_slice(b"|sid|"); buf.extend_from_slice(&self.sid_bytes);
         self.common_h = Some(self.ro.H_full("fischlin.common", &buf));
+        Ok(())
     }
     pub fn begin_verifier(&mut self, statement: &[u8], sid: &[u8]) {
         self.phase = Phase::CollectingFirstMsgs;
@@ -232,10 +264,13 @@ impl<RO: RandomOracle> FischlinOracle<RO> {
         self.absorb("x", statement);
         self.absorb("sid", sid);
     }
-    pub fn push_first_message_verifier(&mut self, m_i: &[u8]) {
-        assert!(matches!(self.phase, Phase::CollectingFirstMsgs));
+    pub fn push_first_message_verifier(&mut self, m_i: &[u8]) -> Result<()> {
+        if !matches!(self.phase, Phase::CollectingFirstMsgs) {
+            return Err(ProveError::Malformed("fischlin: verifier push_first_message before begin"));
+        }
         self.m_vec.push(m_i.to_vec());
         self.absorb("m_i", m_i);
+        Ok(())
     }
 }
 
@@ -260,4 +295,35 @@ fn write_e_bytes(e_val: u64, dst: &mut [u8]) {
     let bytes = e_val.to_le_bytes();
     let n = dst.len().min(bytes.len());
     dst[..n].copy_from_slice(&bytes[..n]);
+}
+
+
+/// Generic retry/search harness used by the macro expansion in Fischlin mode.
+/// - `try_once` should do exactly one attempt (one accepting-transcript search step).
+/// - If `try_once` returns `Err(ProveError::RetryNeeded)`, we keep looping.
+/// - Any other error aborts immediately.
+/// - `on_stream` (optional) lets the caller "add one more thing per try" before `try_once`.
+pub fn search_with_retry<O, TryOnce, Hook, R>(
+    mut oracle: O,
+    retries: usize,
+    mut try_once: TryOnce,
+    mut on_stream: Option<Hook>,
+) -> Result<R>
+where
+    O: TranscriptOracle,
+    TryOnce: FnMut(&mut O, usize) -> Result<R>,
+    Hook: FnMut(&mut O, usize) -> Result<()>,
+{
+    let max = retries.max(1);
+    for i in 0..max {
+        if let Some(h) = on_stream.as_mut() {
+            h(&mut oracle, i)?;
+        }
+        match try_once(&mut oracle, i) {
+            Ok(r) => return Ok(r),
+            Err(ProveError::RetryNeeded) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(ProveError::RetryNeeded)
 }
