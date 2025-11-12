@@ -3,13 +3,16 @@ pub struct FsProof {
     pub m: Vec<Vec<u8>>,
     pub z: Vec<Vec<u8>>,
     pub rho: u16,
+    pub b: u8,
 }
 
 impl FsProof {
     pub fn len(&self) -> usize { self.m.len() }
 
     pub fn is_well_formed(&self) -> bool {
-        self.m.len() == self.z.len() && self.m.len() == self.rho as usize
+        self.m.len() == self.z.len()
+            && self.m.len() == self.rho as usize
+            && self.b > 0
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -25,6 +28,7 @@ impl FsProof {
         let mut out = Vec::new();
         out.extend_from_slice(TAG);
         out.extend_from_slice(&self.rho.to_le_bytes());
+        out.push(self.b);
         push_list(&mut out, &self.m);
         push_list(&mut out, &self.z);
         out
@@ -52,7 +56,7 @@ impl FsProof {
         }
 
         const TAG: &[u8] = b"FS\0";
-        if input.len() < TAG.len() + 2 { return None; }
+        if input.len() < TAG.len() + 3 { return None; }
         if &input[..TAG.len()] != TAG { return None; }
         input = &input[TAG.len()..];
 
@@ -61,9 +65,61 @@ impl FsProof {
         let rho = u16::from_le_bytes(rho_buf);
         input = &input[2..];
 
+        let b = input[0];
+        input = &input[1..];
+
         let m = read_list(&mut input)?;
         let z = read_list(&mut input)?;
 
-        Some(Self { m, z, rho })
+        Some(Self { m, z, rho, b })
     }
+}
+
+use crate::{fs_runtime::FSOracle, runtime::TranscriptRuntime, RandomOracle};
+
+pub fn verify_fs<RO, F>(
+    mut oracle: FSOracle<RO>,
+    statement: impl AsRef<[u8]>,
+    sid: impl AsRef<[u8]>,
+    proof: &FsProof,
+    mut sigma_verify: F,
+) -> bool
+where
+    RO: RandomOracle,
+    F: FnMut(usize, &[u8], &[u8], &[u8]) -> bool,
+{
+    if !proof.is_well_formed() {
+        return false;
+    }
+
+    let stmt = statement.as_ref();
+    let sidb = sid.as_ref();
+
+    oracle.absorb("mode", b"FS");
+    oracle.absorb("x", stmt);
+    oracle.absorb("sid", sidb);
+
+    for m_i in &proof.m {
+        oracle.absorb("m_i", m_i);
+    }
+
+    let b_bits = proof.b;
+    let chal_len = ((usize::from(b_bits) + 7) / 8).max(1);
+    let mask_bits = b_bits & 7;
+
+    for (i, (m_i, z_i)) in proof.m.iter().zip(proof.z.iter()).enumerate() {
+        let mut e_bytes = oracle.derive_challenge("e_i", &[], chal_len);
+        if mask_bits != 0 {
+            if let Some(last) = e_bytes.last_mut() {
+                let mask = (1u8 << mask_bits) - 1;
+                *last &= mask;
+            }
+        }
+        oracle.absorb("e_i", &e_bytes);
+        oracle.absorb("z_i", z_i);
+        if !sigma_verify(i, m_i, &e_bytes, z_i) {
+            return false;
+        }
+    }
+    true
 }

@@ -122,7 +122,7 @@ fn main() -> Result<()> {
     };
     let sid = b"interchange-demo";
     let rho: u16 = 16;
-    let b_bits: u8 = 4;
+    let b_bits: u8 = 8;
     let rng = StdRng::seed_from_u64(1337);
 
     let (fs_proof, fischlin_proof) =

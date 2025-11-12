@@ -876,6 +876,7 @@ struct ProveArgs {
     sid: Expr,
     first: ExprClosure,
     respond: ExprClosure,
+    respond_stream: Option<ExprClosure>,
 }
 
 impl Parse for ProveArgs {
@@ -888,6 +889,7 @@ impl Parse for ProveArgs {
         let mut sid = None;
         let mut first = None;
         let mut respond = None;
+        let mut respond_stream = None;
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
@@ -904,7 +906,7 @@ impl Parse for ProveArgs {
                 "sid" => sid = Some(input.parse()?),
                 "first" => first = Some(input.parse()?),
                 "respond" => respond = Some(input.parse()?),
-                "respond_stream" => return Err(Error::new(ident.span(), "`respond_stream` is not supported in this macro")),
+                "respond_stream" => respond_stream = Some(input.parse()?),
                 other => return Err(Error::new(ident.span(), format!("unknown key `{other}`"))),
             }
             let _ = input.parse::<Token![,]>();
@@ -919,6 +921,7 @@ impl Parse for ProveArgs {
             sid: sid.ok_or_else(|| Error::new(Span::call_site(), "missing `sid`"))?,
             first: first.ok_or_else(|| Error::new(Span::call_site(), "missing `first`"))?,
             respond: respond.ok_or_else(|| Error::new(Span::call_site(), "missing `respond`"))?,
+            respond_stream,
         })
     }
 }
@@ -932,15 +935,38 @@ fn expand_prove_fischlin(args: ProveArgs) -> TokenStream2 {
         sid,
         first,
         respond,
+        respond_stream,
         ..
     } = args;
+
+    let search_loop = if let Some(rs) = respond_stream {
+        quote! {
+            let mut __respond_stream = (#rs);
+            for __i in 0..(__rho_u16 as usize) {
+                let mut __z_stream = __respond_stream(__i, &__sigmas[__i]);
+                let (__e_out, __z_out) = __oracle.search_round_stream(__i as u32, || __z_stream())?;
+                __e_vec.push(__e_out);
+                __z_vec.push(__z_out);
+            }
+        }
+    } else {
+        quote! {
+            let mut __respond = (#respond);
+            for __i in 0..(__rho_u16 as usize) {
+                let (__e_out, __z_out) = __oracle.search_round(__i as u32, |__e_try: &[u8]| {
+                    __respond(__i, __e_try, &__sigmas[__i])
+                })?;
+                __e_vec.push(__e_out);
+                __z_vec.push(__z_out);
+            }
+        }
+    };
     quote!({
         use fsr_core::FischlinProof;
         let __result: fsr_core::Result<FischlinProof> = (|| {
             let mut __oracle = #oracle;
             let __rho_u16: u16 = (#rho);
             let mut __first = (#first);
-            let mut __respond = (#respond);
             let __stmt_owned = (#statement);
             let __sid_owned = (#sid);
             let __stmt: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__stmt_owned);
@@ -962,15 +988,80 @@ fn expand_prove_fischlin(args: ProveArgs) -> TokenStream2 {
             let mut __e_vec = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
             let mut __z_vec = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
 
-            for __i in 0..(__rho_u16 as usize) {
-                let (__e_out, __z_out) = __oracle.search_round(__i as u32, |__e_try: &[u8]| -> ::std::vec::Vec<u8> {
-                    __respond(__i, __e_try, &__sigmas[__i])
-                })?;
-                __e_vec.push(__e_out);
-                __z_vec.push(__z_out);
-            }
+            #search_loop
 
             Ok(FischlinProof { m: __first_msgs, e: __e_vec, z: __z_vec, b: (#b), rho: (#rho) })
+        })();
+        __result
+    })
+}
+
+fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
+    let ProveArgs {
+        oracle,
+        rho,
+        b,
+        statement,
+        sid,
+        first,
+        respond,
+        respond_stream,
+        ..
+    } = args;
+
+    if let Some(rs) = respond_stream {
+        return Error::new(rs.span(), "`respond_stream` is only supported for transform = \"fischlin\"")
+            .to_compile_error();
+    }
+
+    quote!({
+        use fsr_core::TranscriptRuntime;
+        let __result: fsr_core::Result<fsr_core::FsProof> = (|| {
+            let __rho_u16: u16 = (#rho);
+            let __b_bits: u8 = (#b);
+            let mut __fs_ro = #oracle;
+            let mut __oracle = fsr_core::FSOracle::new(__fs_ro);
+
+            let __stmt_owned = (#statement);
+            let __sid_owned = (#sid);
+            let __stmt: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__stmt_owned);
+            let __sid: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__sid_owned);
+
+            __oracle.absorb("mode", b"FS");
+            __oracle.absorb("x", __stmt);
+            __oracle.absorb("sid", __sid);
+
+            let mut __first = (#first);
+            let mut __respond = (#respond);
+
+            let mut __first_msgs = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
+            let mut __sigmas = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
+            for __i in 0..(__rho_u16 as usize) {
+                let (__m_bytes, __sigma) = __first(__i);
+                __oracle.absorb("m_i", &__m_bytes);
+                __first_msgs.push(__m_bytes);
+                __sigmas.push(__sigma);
+            }
+
+            let mut __z_vec = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
+            let __chal_len = ((usize::from(__b_bits) + 7) / 8).max(1);
+
+            for __i in 0..(__rho_u16 as usize) {
+                let mut __challenge = __oracle.derive_challenge("e_i", &[], __chal_len);
+                let __mask_bits = __b_bits & 7;
+                if __mask_bits != 0 {
+                    if let Some(__last) = __challenge.last_mut() {
+                        let __mask: u8 = (1u8 << __mask_bits) - 1;
+                        *__last &= __mask;
+                    }
+                }
+                let __z_bytes = __respond(__i, &__challenge, &__sigmas[__i]);
+                __oracle.absorb("e_i", &__challenge);
+                __oracle.absorb("z_i", &__z_bytes);
+                __z_vec.push(__z_bytes);
+            }
+
+            Ok(fsr_core::FsProof { m: __first_msgs, z: __z_vec, rho: __rho_u16, b: __b_bits })
         })();
         __result
     })
@@ -982,6 +1073,7 @@ pub fn prove(input: TokenStream) -> TokenStream {
     let transform = args.transform.clone().unwrap_or_else(|| "fischlin".to_string());
     match transform.as_str() {
         "fischlin" => expand_prove_fischlin(args).into(),
+        "fs" => expand_prove_fs(args).into(),
         other => Error::new(Span::call_site(), format!("unknown transform `{other}`")).to_compile_error().into(),
     }
 }
@@ -1032,6 +1124,24 @@ impl Parse for VerifyArgs {
             sigma_verify: sigma_verify.ok_or_else(|| Error::new(Span::call_site(), "missing `sigma_verify`"))?,
         })
     }
+}
+
+fn expand_verify_fs(args: VerifyArgs) -> TokenStream2 {
+    let oracle = args.oracle;
+    let statement = args.statement;
+    let sid = args.sid;
+    let proof = args.proof;
+    let sigma_verify = args.sigma_verify;
+
+    quote!({
+        fsr_core::fs_proof::verify_fs(
+            fsr_core::FSOracle::new(#oracle),
+            #statement,
+            #sid,
+            #proof,
+            #sigma_verify,
+        )
+    })
 }
 
 fn expand_verify_fischlin(args: VerifyArgs) -> TokenStream2 {
@@ -1102,6 +1212,7 @@ pub fn verify(input: TokenStream) -> TokenStream {
     let transform = args.transform.clone().unwrap_or_else(|| "fischlin".to_string());
     match transform.as_str() {
         "fischlin" => expand_verify_fischlin(args).into(),
+        "fs" => expand_verify_fs(args).into(),
         other => Error::new(Span::call_site(), format!("unknown transform `{other}`")).to_compile_error().into(),
     }
 }
