@@ -5,6 +5,7 @@ use syn::{
     braced, parse::Parse, parse::ParseStream, parse_macro_input, Expr, ExprClosure, Ident, LitBool, LitInt,
     LitStr, Result, Stmt, Token, Type, Error, ExprLit, ExprPath, Lit, LitByteStr, spanned::Spanned,
 };
+use syn::visit::{self, Visit};
 
 
 // Parse a label expression limited to either a string literal or a path like Commit::LABEL_t
@@ -449,6 +450,17 @@ fn expand(spec: ProofSpec) -> TokenStream2 {
                 label_checks.push(quote_spanned! { e.span()=> { let _: &'static str = #e; } });
             }
 
+            // --- coverage: derive required labels for first-class obligations ---
+            let mut required_labels: Vec<TokenStream2> = Vec::new();
+            for e in fields.iter().filter_map(|f| match &f.src {
+                FieldSrc::Absorb{label} => Some(label.clone()),
+                _ => None,
+            }) { required_labels.push(quote! { #e }); }
+            for e in replay.stmts.iter().filter_map(|s| match s {
+                ReplayStmt::BindValue{label,..} | ReplayStmt::BindLabel{label} => Some(label.clone()),
+                _ => None,
+            }) { required_labels.push(quote! { #e }); }
+
             // --- prove: extract each field by scanning events forward (cursor), then return Proof ---
             let prove_extracts: Vec<_> = fields.iter().map(|f| {
                 let id = &f.ident;
@@ -535,6 +547,12 @@ fn expand(spec: ProofSpec) -> TokenStream2 {
 
                     // compile-time label type checks
                     const _: () = { #( #label_checks )* };
+
+                    // FIRST-CLASS coverage obligations derived from the spec
+                    pub const REQUIRED_LABELS: &'static [&'static str] = &[ #( #required_labels ),* ];
+
+                    // FIRST-CLASS coverage obligations derived from the spec
+                    pub const REQUIRED_LABELS: &'static [&'static str] = &[ #( #required_labels ),* ];
 
                     #[derive(Clone, Debug)]
                     pub struct #proof_name { #(pub #f_ids: #f_tys,)* }
@@ -877,6 +895,8 @@ struct ProveArgs {
     first: ExprClosure,
     respond: ExprClosure,
     respond_stream: Option<ExprClosure>,
+    bind: Option<ExprClosure>,
+    require: Vec<String>,
 }
 
 impl Parse for ProveArgs {
@@ -890,6 +910,8 @@ impl Parse for ProveArgs {
         let mut first = None;
         let mut respond = None;
         let mut respond_stream = None;
+        let mut bind = None;
+        let mut require: Vec<String> = Vec::new();
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
             input.parse::<Token![=]>()?;
@@ -907,6 +929,16 @@ impl Parse for ProveArgs {
                 "first" => first = Some(input.parse()?),
                 "respond" => respond = Some(input.parse()?),
                 "respond_stream" => respond_stream = Some(input.parse()?),
+                "bind" => bind = Some(input.parse()?),
+                "require" | "required" => {
+                    let content;
+                    syn::bracketed!(content in input);
+                    while !content.is_empty() {
+                        let s: LitStr = content.parse()?;
+                        require.push(s.value());
+                        let _ = content.parse::<Token![,]>();
+                    }
+                }
                 other => return Err(Error::new(ident.span(), format!("unknown key `{other}`"))),
             }
             let _ = input.parse::<Token![,]>();
@@ -922,8 +954,62 @@ impl Parse for ProveArgs {
             first: first.ok_or_else(|| Error::new(Span::call_site(), "missing `first`"))?,
             respond: respond.ok_or_else(|| Error::new(Span::call_site(), "missing `respond`"))?,
             respond_stream,
+            bind,
+            require,
         })
     }
+}
+
+// Visitor to collect absorb label literals inside a closure body
+struct AbsorbLabelFinder { labels: Vec<String> }
+impl<'ast> Visit<'ast> for AbsorbLabelFinder {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if node.method == "absorb" {
+            if let Some(first) = node.args.first() {
+                if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = first {
+                    self.labels.push(s.value());
+                }
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        // Handle UFCS: fsr_core::TranscriptRuntime::absorb(o, "label", bytes)
+        if let syn::Expr::Path(path) = &*node.func {
+            if let Some(seg) = path.path.segments.last() {
+                if seg.ident == "absorb" {
+                    if node.args.len() >= 2 {
+                        if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &node.args[1] {
+                            self.labels.push(s.value());
+                        }
+                    }
+                }
+            }
+        }
+        visit::visit_expr_call(self, node);
+    }
+}
+fn check_bind_covers(bind: &ExprClosure, required: &[String]) -> Result<()> {
+    let mut f = AbsorbLabelFinder { labels: Vec::new() };
+    f.visit_expr(&bind.body);
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|r| !f.labels.iter().any(|l| l == *r))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        let hint = if missing.len() == 1 {
+            format!("add: fsr_core::TranscriptRuntime::absorb(o, \"{}\", <bytes>)", missing[0])
+        } else {
+            let samples: Vec<String> = missing.iter().map(|l| format!("fsr_core::TranscriptRuntime::absorb(o, \"{}\", <bytes>)", l)).collect();
+            format!("add binds such as: {}", samples.join(", "))
+        };
+        return Err(Error::new(bind.span(), format!(
+            "coverage: missing absorb() for labels before challenge: {}. {}",
+            missing.join(", "), hint
+        )));
+    }
+    Ok(())
 }
 
 fn expand_prove_fischlin(args: ProveArgs) -> TokenStream2 {
@@ -936,8 +1022,21 @@ fn expand_prove_fischlin(args: ProveArgs) -> TokenStream2 {
         first,
         respond,
         respond_stream,
+        bind,
+        require,
         ..
     } = args;
+
+    if !require.is_empty() {
+        match &bind {
+            Some(bc) => {
+                if let Err(e) = check_bind_covers(bc, &require) { return e.to_compile_error(); }
+            }
+            None => {
+                return Error::new(Span::call_site(), "coverage: `require = [...]` specified but no `bind = |...| { ... }` provided").to_compile_error();
+            }
+        }
+    }
 
     let search_loop = if let Some(rs) = respond_stream {
         quote! {
@@ -961,6 +1060,10 @@ fn expand_prove_fischlin(args: ProveArgs) -> TokenStream2 {
             }
         }
     };
+
+    let bind_hook_loop = if let Some(bc) = bind.clone() {
+        quote! {{ let mut __b = #bc; __b(&mut __oracle, __i, &__m_bytes); }}
+    } else { quote!{} };
     quote!({
         use fsr_core::FischlinProof;
         let __result: fsr_core::Result<FischlinProof> = (|| {
@@ -979,6 +1082,7 @@ fn expand_prove_fischlin(args: ProveArgs) -> TokenStream2 {
             for __i in 0..(__rho_u16 as usize) {
                 let (__m_bytes, __sigma) = __first(__i);
                 __oracle.push_first_message(&__m_bytes)?;
+                #bind_hook_loop
                 __first_msgs.push(__m_bytes);
                 __sigmas.push(__sigma);
             }
@@ -1006,6 +1110,8 @@ fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
         first,
         respond,
         respond_stream,
+        bind,
+        require,
         ..
     } = args;
 
@@ -1014,7 +1120,21 @@ fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
             .to_compile_error();
     }
 
+    if !require.is_empty() {
+        match &bind {
+            Some(bc) => {
+                if let Err(e) = check_bind_covers(bc, &require) { return e.to_compile_error(); }
+            }
+            None => {
+                return Error::new(Span::call_site(), "coverage: `require = [...]` specified but no `bind = |...| { ... }` provided").to_compile_error();
+            }
+        }
+    }
+
     // FS variant: ignore rho and b; sample a single challenge after absorbing inputs.
+    let bind_hook_once = if let Some(bc) = bind.clone() {
+        quote! {{ let mut __b = #bc; __b(&mut __oracle, 0usize, &__m_bytes); }}
+    } else { quote!{} };
     quote!({
         use fsr_core::TranscriptRuntime;
         let __result: fsr_core::Result<fsr_core::FsProof> = (|| {
@@ -1035,6 +1155,7 @@ fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
             let mut __first = (#first);
             let (__m_bytes, __sigma) = __first(0usize);
             __oracle.absorb("m_i", &__m_bytes);
+            #bind_hook_once
 
             // Derive one challenge based on transcript state
             let __challenge_len = 32usize; // fixed-size challenge, independent of b
@@ -1144,6 +1265,8 @@ struct VerifyArgs {
     sid: Expr,
     proof: Expr,
     sigma_verify: ExprClosure,
+    bind: Option<ExprClosure>,
+    require: Vec<String>,
 }
 
 impl Parse for VerifyArgs {
@@ -1154,6 +1277,8 @@ impl Parse for VerifyArgs {
         let mut sid = None;
         let mut proof = None;
         let mut sigma_verify = None;
+        let mut bind = None;
+        let mut require: Vec<String> = Vec::new();
 
         while !input.is_empty() {
             let ident: Ident = input.parse()?;
@@ -1169,6 +1294,16 @@ impl Parse for VerifyArgs {
                 "sid" => sid = Some(input.parse()?),
                 "proof" => proof = Some(input.parse()?),
                 "sigma_verify" => sigma_verify = Some(input.parse()?),
+                "bind" => bind = Some(input.parse()?),
+                "require" | "required" => {
+                    let content;
+                    syn::bracketed!(content in input);
+                    while !content.is_empty() {
+                        let s: LitStr = content.parse()?;
+                        require.push(s.value());
+                        let _ = content.parse::<Token![,]>();
+                    }
+                }
                 other => return Err(Error::new(ident.span(), format!("unknown key `{other}`"))),
             }
             let _ = input.parse::<Token![,]>();
@@ -1181,6 +1316,8 @@ impl Parse for VerifyArgs {
             sid: sid.ok_or_else(|| Error::new(Span::call_site(), "missing `sid`"))?,
             proof: proof.ok_or_else(|| Error::new(Span::call_site(), "missing `proof`"))?,
             sigma_verify: sigma_verify.ok_or_else(|| Error::new(Span::call_site(), "missing `sigma_verify`"))?,
+            bind,
+            require,
         })
     }
 }
@@ -1191,15 +1328,51 @@ fn expand_verify_fs(args: VerifyArgs) -> TokenStream2 {
     let sid = args.sid;
     let proof = args.proof;
     let sigma_verify = args.sigma_verify;
+    let bind = args.bind;
+    let require = args.require;
+
+    if !require.is_empty() {
+        match &bind {
+            Some(bc) => {
+                if let Err(e) = check_bind_covers(bc, &require) {
+                    let msg = format!("FS coverage: bind closure missing required absorbs: {}", require.join(", "));
+                    return Error::new(bc.span(), msg).to_compile_error();
+                }
+            }
+            None => {
+                return Error::new(Span::call_site(), "FS coverage: `require = [...]` specified but no `bind = |...| { ... }` provided").to_compile_error();
+            }
+        }
+    }
+
+    let bind_hook_each = if let Some(bc) = bind {
+        quote! {{ let mut __b = #bc; __b(&mut __oracle, __i, &proof.m[__i]); }}
+    } else { quote!{} };
 
     quote!({
-        fsr_core::fs_proof::verify_fs(
-            fsr_core::FSOracle::new(#oracle),
-            #statement,
-            #sid,
-            #proof,
-            #sigma_verify,
-        )
+        let mut __oracle = fsr_core::FSOracle::new(#oracle);
+        let __stmt_owned = (#statement);
+        let __sid_owned  = (#sid);
+        let __stmt: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__stmt_owned);
+        let __sidb: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__sid_owned);
+        let __proof = (#proof);
+        let mut __ok = true;
+        if !__proof.is_well_formed() { __ok = false; } else {
+            fsr_core::TranscriptRuntime::absorb(&mut __oracle, "mode", b"FS");
+            fsr_core::TranscriptRuntime::absorb(&mut __oracle, "x", __stmt);
+            fsr_core::TranscriptRuntime::absorb(&mut __oracle, "sid", __sidb);
+            for __i in 0..__proof.m.len() {
+                fsr_core::TranscriptRuntime::absorb(&mut __oracle, "m_i", &__proof.m[__i]);
+                #bind_hook_each
+            }
+            for __i in 0..__proof.m.len() {
+                let __e_bytes = __oracle.derive_challenge("e_i", &[], 32);
+                fsr_core::TranscriptRuntime::absorb(&mut __oracle, "e_i", &__e_bytes);
+                fsr_core::TranscriptRuntime::absorb(&mut __oracle, "z_i", &__proof.z[__i]);
+                if !(#sigma_verify)(__i, &__proof.m[__i], &__e_bytes, &__proof.z[__i]) { __ok = false; break; }
+            }
+        }
+        __ok
     })
 }
 
@@ -1209,6 +1382,26 @@ fn expand_verify_fischlin(args: VerifyArgs) -> TokenStream2 {
     let sid = args.sid;
     let proof = args.proof;
     let sigma_verify = args.sigma_verify;
+    let bind = args.bind;
+    let require = args.require;
+
+    if !require.is_empty() {
+        match &bind {
+            Some(bc) => {
+                if let Err(e) = check_bind_covers(bc, &require) {
+                    let msg = format!("Fischlin coverage: bind closure missing required absorbs: {}", require.join(", "));
+                    return Error::new(bc.span(), msg).to_compile_error();
+                }
+            }
+            None => {
+                return Error::new(Span::call_site(), "Fischlin coverage: `require = [...]` specified but no `bind = |...| { ... }` provided").to_compile_error();
+            }
+        }
+    }
+
+    let bind_hook_each = if let Some(bc) = bind {
+        quote! {{ let mut __b = #bc; __b(&mut __oracle, __i, &__proof.m[__i]); }}
+    } else { quote!{} };
 
     quote!({
         let mut __oracle = #oracle;
@@ -1229,6 +1422,12 @@ fn expand_verify_fischlin(args: VerifyArgs) -> TokenStream2 {
                 if __oracle.push_first_message_verifier(__m).is_err() {
                     __setup_ok = false;
                     break;
+                }
+            }
+            if __setup_ok {
+                // Optional bind hook for each first message before finalizing common hash
+                for __i in 0..__proof.m.len() {
+                    #bind_hook_each
                 }
             }
             if __setup_ok {
@@ -1279,7 +1478,12 @@ pub fn verify(input: TokenStream) -> TokenStream {
 #[proc_macro]
 pub fn verify_source(input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(input as VerifyArgs);
-    let stream = expand_verify_fischlin(args);
+    let transform = args.transform.clone().unwrap_or_else(|| "fischlin".to_string());
+    let stream = match transform.as_str() {
+        "fischlin" => expand_verify_fischlin(args),
+        "fs" => expand_verify_fs(args),
+        other => Error::new(Span::call_site(), format!("unknown transform `{other}`")).to_compile_error(),
+    };
     let lit = LitStr::new(&stream.to_string(), Span::call_site());
     quote!(#lit).into()
 }

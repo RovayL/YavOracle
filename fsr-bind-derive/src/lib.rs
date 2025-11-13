@@ -2,9 +2,10 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Fields, LitInt, LitStr, Path, DataStruct, ItemFn, Macro
+    parse_macro_input, spanned::Spanned, Attribute, Data, DeriveInput, Fields, LitInt, LitStr, Path, DataStruct, ItemFn, Macro, Expr, ExprMethodCall
 };
 use syn::visit::{self, Visit};
+use quote::ToTokens;
 
 /// We purposely name the derive macro **FsrBindable** to avoid any name collision
 /// with the runtime trait `fsr_core::Bindable`.
@@ -311,4 +312,79 @@ impl<'ast> Visit<'ast> for BarrierVisitor {
 
 
 
+// -------------------------------------    FS COVERAGE ENFORCEMENT ATTRIBUTE    -------------------------------------
+
+/// Attribute that enforces that required labels have been absorbed into the FS transcript
+/// before any call to `derive_challenge(...)`.
+///
+/// Usage:
+///   #[enforce_fs_coverage(required = "c_0,c_1")]
+///   fn prover(...) { ... oracle.absorb("c_0", ...); oracle.absorb("c_1", ...); oracle.derive_challenge(...); }
+#[proc_macro_attribute]
+pub fn enforce_fs_coverage(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let func = parse_macro_input!(item as ItemFn);
+
+    // Parse attribute args: required = "c_0,c_1"
+    let raw = attr.to_string();
+    let mut required: Vec<String> = Vec::new();
+    if !raw.trim().is_empty() {
+        // very small parser: look for required = "..."
+        let parts: Vec<&str> = raw.split('=').collect();
+        if parts.len() == 2 && parts[0].trim().ends_with("required") {
+            let rhs = parts[1].trim();
+            // strip optional quotes
+            let rhs = rhs.trim();
+            let rhs = rhs.trim_matches(|c| c == '"' || c == '\'' || c == ' ');
+            for s in rhs.split(',') { let s = s.trim(); if !s.is_empty() { required.push(s.to_string()); } }
+        }
+    }
+
+    let mut v = FsCoverageVisitor::new(required.clone());
+    v.visit_item_fn(&func);
+
+    if let Some(err) = v.error_token {
+        let err = syn::Error::new_spanned(func.sig.ident.clone(), err).to_compile_error();
+        return quote!(#err #func).into();
+    }
+
+    quote!(#func).into()
+}
+
+#[derive(Default)]
+struct FsCoverageVisitor {
+    required: Vec<String>,
+    seen: Vec<String>,
+    error_token: Option<String>,
+}
+
+impl FsCoverageVisitor {
+    fn new(required: Vec<String>) -> Self { Self { required, ..Default::default() } }
+}
+
+impl<'ast> Visit<'ast> for FsCoverageVisitor {
+    fn visit_expr_method_call(&mut self, node: &'ast ExprMethodCall) {
+        let name = node.method.to_string();
+        if name == "absorb" {
+            if let Some(first_arg) = node.args.first() {
+                if let Expr::Lit(expr_lit) = first_arg {
+                    if let syn::Lit::Str(s) = &expr_lit.lit {
+                        self.seen.push(s.value());
+                    }
+                }
+            }
+        } else if name == "derive_challenge" {
+            // Check coverage
+            for req in &self.required {
+                if !self.seen.iter().any(|s| s == req) {
+                    self.error_token = Some(format!(
+                        "FS coverage: missing absorb for required label `{}` before derive_challenge",
+                        req
+                    ));
+                    return;
+                }
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
 
