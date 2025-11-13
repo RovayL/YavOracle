@@ -999,7 +999,7 @@ fn expand_prove_fischlin(args: ProveArgs) -> TokenStream2 {
 fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
     let ProveArgs {
         oracle,
-        rho,
+        rho: _rho_unused,
         b,
         statement,
         sid,
@@ -1014,10 +1014,10 @@ fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
             .to_compile_error();
     }
 
+    // FS variant: ignore rho and sample a single challenge after absorbing inputs.
     quote!({
         use fsr_core::TranscriptRuntime;
         let __result: fsr_core::Result<fsr_core::FsProof> = (|| {
-            let __rho_u16: u16 = (#rho);
             let __b_bits: u8 = (#b);
             let mut __fs_ro = #oracle;
             let mut __oracle = fsr_core::FSOracle::new(__fs_ro);
@@ -1027,45 +1027,112 @@ fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
             let __stmt: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__stmt_owned);
             let __sid: &[u8] = ::core::convert::AsRef::<[u8]>::as_ref(&__sid_owned);
 
+            // Commit common inputs
             __oracle.absorb("mode", b"FS");
             __oracle.absorb("x", __stmt);
             __oracle.absorb("sid", __sid);
 
+            // First message (single round for FS)
             let mut __first = (#first);
-            let mut __respond = (#respond);
+            let (__m_bytes, __sigma) = __first(0usize);
+            __oracle.absorb("m_i", &__m_bytes);
 
-            let mut __first_msgs = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
-            let mut __sigmas = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
-            for __i in 0..(__rho_u16 as usize) {
-                let (__m_bytes, __sigma) = __first(__i);
-                __oracle.absorb("m_i", &__m_bytes);
-                __first_msgs.push(__m_bytes);
-                __sigmas.push(__sigma);
-            }
-
-            let mut __z_vec = ::std::vec::Vec::with_capacity(__rho_u16 as usize);
+            // Derive one challenge based on transcript state
             let __chal_len = ((usize::from(__b_bits) + 7) / 8).max(1);
-
-            for __i in 0..(__rho_u16 as usize) {
-                let mut __challenge = __oracle.derive_challenge("e_i", &[], __chal_len);
-                let __mask_bits = __b_bits & 7;
-                if __mask_bits != 0 {
-                    if let Some(__last) = __challenge.last_mut() {
-                        let __mask: u8 = (1u8 << __mask_bits) - 1;
-                        *__last &= __mask;
-                    }
+            let mut __challenge = __oracle.derive_challenge("e_i", &[], __chal_len);
+            let __mask_bits = __b_bits & 7;
+            if __mask_bits != 0 {
+                if let Some(__last) = __challenge.last_mut() {
+                    let __mask: u8 = (1u8 << __mask_bits) - 1;
+                    *__last &= __mask;
                 }
-                let __z_bytes = __respond(__i, &__challenge, &__sigmas[__i]);
-                __oracle.absorb("e_i", &__challenge);
-                __oracle.absorb("z_i", &__z_bytes);
-                __z_vec.push(__z_bytes);
             }
 
-            Ok(fsr_core::FsProof { m: __first_msgs, z: __z_vec, rho: __rho_u16, b: __b_bits })
+            // Respond once
+            let mut __respond = (#respond);
+            let __z_bytes = __respond(0usize, &__challenge, &__sigma);
+            __oracle.absorb("e_i", &__challenge);
+            __oracle.absorb("z_i", &__z_bytes);
+
+            // Build compact FS proof (single round)
+            Ok(fsr_core::FsProof { m: ::std::vec![__m_bytes], z: ::std::vec![__z_bytes], rho: 1u16, b: __b_bits })
         })();
         __result
     })
 }
+
+// fn expand_prove_fs(args: ProveArgs) -> proc_macro2::TokenStream {
+//     use quote::{format_ident, quote};
+
+//     let ProveArgs {
+//         oracle,
+//         rho, b,                 // ignored in FS
+//         statement, sid,
+//         first, respond,
+//         respond_stream,         // ignored in FS
+//         ..
+//     } = args;
+
+//     let tr_oracle     = format_ident!("__oracle");
+//     let tr_first      = format_ident!("__first");
+//     let tr_respond    = format_ident!("__respond");
+//     let tr_t          = format_ident!("__t");
+//     let tr_r          = format_ident!("__r");
+//     let tr_sid_bytes  = format_ident!("__sid_bytes");
+//     let tr_stmt_bytes = format_ident!("__stmt_bytes");
+//     let tr_buf        = format_ident!("__buf");
+//     let tr_e_bytes    = format_ident!("__e_bytes");
+//     let tr_z          = format_ident!("__z");
+//     let tr_proof      = format_ident!("__proof");
+//     let _unused       = format_ident!("__unused");
+
+//     quote! {{
+//         // Keep signature parity with Fischlin
+//         let #_unused = (&#rho, &#b, &#respond_stream);
+
+//         // Oracle
+//         let mut #tr_oracle = { #oracle };
+
+//         // First round -> (T, r)
+//         let mut #tr_first = #first;
+//         let (#tr_t, #tr_r) = (#tr_first)(0usize);
+
+//         // &[u8] views
+//         let #tr_sid_bytes: &[u8] = { let __tmp = #sid; &__tmp[..] };
+//         let #tr_stmt_bytes: &[u8] = { let __tmp = #statement; &__tmp[..] };
+
+//         // sid || statement || T
+//         let mut #tr_buf = ::std::vec::Vec::<u8>::with_capacity(
+//             #tr_sid_bytes.len() + #tr_stmt_bytes.len() + #tr_t.len()
+//         );
+//         #tr_buf.extend_from_slice(#tr_sid_bytes);
+//         #tr_buf.extend_from_slice(#tr_stmt_bytes);
+//         #tr_buf.extend_from_slice(&#tr_t[..]);
+
+//         // One-shot FS challenge (UFCS so the trait needn't be imported at call site)
+//         let #tr_e_bytes = fsr_core::RandomOracle::H_full(&mut #tr_oracle, "e", &#tr_buf);
+
+//         // z = respond(i, e_bytes, &r_i)   <-- pass &r, not r
+//         let mut #tr_respond = #respond;
+//         let #tr_z = (#tr_respond)(0usize, &#tr_e_bytes[..], &#tr_r);
+
+//         // FS proof: wrap single round as Vec<Vec<u8>>; neutral Fischlin fields
+//         let #tr_proof = fsr_core::FsProof {
+//             m: ::std::vec![#tr_t],
+//             z: ::std::vec![#tr_z],
+//             rho: 0u16,               // <-- u16, not Vec<u16>
+//             b: 0u8,
+//         };
+
+//         Ok::<_, _>(#tr_proof)
+//     }}
+// }
+
+
+
+
+
+
 
 #[proc_macro]
 pub fn prove(input: TokenStream) -> TokenStream {
