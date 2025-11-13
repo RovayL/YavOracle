@@ -101,5 +101,22 @@ fn main() -> Result<()> {
     println!("FS verify = {}", ok);
     let proof_bytes = proof.encode();
     println!("FS proof bytes ({}): 0x{}", proof_bytes.len(), hex::encode(&proof_bytes));
+
+    let verifier_src = fsr_proof_dsl::verify_source! {
+        transform = "fs",
+        oracle = HashOracle::new(b"YavOracle/FS-Macro"),
+        statement = &statement_for_verify,
+        sid = sid,
+        proof = &proof,
+        sigma_verify = |_i, m_bytes, e_bytes, z_bytes| {
+            let m = FirstMsg { t: G1(dec_le_u64(m_bytes)) };
+            let e = Scalar(dec_le_u64(e_bytes) % ORDER_Q);
+            let z = Resp { z: Scalar(dec_le_u64(z_bytes) % ORDER_Q) };
+            schnorr_verify(&pubc, &m, e, &z)
+        }
+    };
+
+    println!("--- Schnorr FS verifier ---\n{}\n", verifier_src);
+
     Ok(())
 }

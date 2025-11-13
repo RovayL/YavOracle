@@ -12,7 +12,6 @@ impl FsProof {
     pub fn is_well_formed(&self) -> bool {
         self.m.len() == self.z.len()
             && self.m.len() == self.rho as usize
-            && self.b > 0
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -103,18 +102,10 @@ where
         oracle.absorb("m_i", m_i);
     }
 
-    let b_bits = proof.b;
-    let chal_len = ((usize::from(b_bits) + 7) / 8).max(1);
-    let mask_bits = b_bits & 7;
-
+    // Fixed-length challenge derived from the transcript; ignore proof.b
+    let chal_len = 32usize;
     for (i, (m_i, z_i)) in proof.m.iter().zip(proof.z.iter()).enumerate() {
-        let mut e_bytes = oracle.derive_challenge("e_i", &[], chal_len);
-        if mask_bits != 0 {
-            if let Some(last) = e_bytes.last_mut() {
-                let mask = (1u8 << mask_bits) - 1;
-                *last &= mask;
-            }
-        }
+        let e_bytes = oracle.derive_challenge("e_i", &[], chal_len);
         oracle.absorb("e_i", &e_bytes);
         oracle.absorb("z_i", z_i);
         if !sigma_verify(i, m_i, &e_bytes, z_i) {

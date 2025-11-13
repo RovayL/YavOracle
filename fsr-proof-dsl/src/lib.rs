@@ -1000,7 +1000,7 @@ fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
     let ProveArgs {
         oracle,
         rho: _rho_unused,
-        b,
+        b: _b_unused,
         statement,
         sid,
         first,
@@ -1014,11 +1014,10 @@ fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
             .to_compile_error();
     }
 
-    // FS variant: ignore rho and sample a single challenge after absorbing inputs.
+    // FS variant: ignore rho and b; sample a single challenge after absorbing inputs.
     quote!({
         use fsr_core::TranscriptRuntime;
         let __result: fsr_core::Result<fsr_core::FsProof> = (|| {
-            let __b_bits: u8 = (#b);
             let mut __fs_ro = #oracle;
             let mut __oracle = fsr_core::FSOracle::new(__fs_ro);
 
@@ -1038,15 +1037,8 @@ fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
             __oracle.absorb("m_i", &__m_bytes);
 
             // Derive one challenge based on transcript state
-            let __chal_len = ((usize::from(__b_bits) + 7) / 8).max(1);
-            let mut __challenge = __oracle.derive_challenge("e_i", &[], __chal_len);
-            let __mask_bits = __b_bits & 7;
-            if __mask_bits != 0 {
-                if let Some(__last) = __challenge.last_mut() {
-                    let __mask: u8 = (1u8 << __mask_bits) - 1;
-                    *__last &= __mask;
-                }
-            }
+            let __challenge_len = 32usize; // fixed-size challenge, independent of b
+            let __challenge = __oracle.derive_challenge("e_i", &[], __challenge_len);
 
             // Respond once
             let mut __respond = (#respond);
@@ -1055,7 +1047,7 @@ fn expand_prove_fs(args: ProveArgs) -> TokenStream2 {
             __oracle.absorb("z_i", &__z_bytes);
 
             // Build compact FS proof (single round)
-            Ok(fsr_core::FsProof { m: ::std::vec![__m_bytes], z: ::std::vec![__z_bytes], rho: 1u16, b: __b_bits })
+            Ok(fsr_core::FsProof { m: ::std::vec![__m_bytes], z: ::std::vec![__z_bytes], rho: 1u16, b: 0u8 })
         })();
         __result
     })
