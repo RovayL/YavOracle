@@ -549,10 +549,7 @@ fn expand(spec: ProofSpec) -> TokenStream2 {
                     const _: () = { #( #label_checks )* };
 
                     // FIRST-CLASS coverage obligations derived from the spec
-                    pub const REQUIRED_LABELS: &'static [&'static str] = &[ #( #required_labels ),* ];
-
-                    // FIRST-CLASS coverage obligations derived from the spec
-                    pub const REQUIRED_LABELS: &'static [&'static str] = &[ #( #required_labels ),* ];
+                    pub const REQUIRED_LABELS_PROOF: &'static [&'static str] = &[ #( #required_labels ),* ];
 
                     #[derive(Clone, Debug)]
                     pub struct #proof_name { #(pub #f_ids: #f_tys,)* }

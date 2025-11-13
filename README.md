@@ -210,6 +210,51 @@ For round k:
 
 ---
 
+## New: Coverage-Safe FS/Fischlin via DSL
+
+We added a lightweight macro DSL in `fsr-proof-dsl` to describe proof emission and verification, with compile-time coverage checks that apply to both FS and Fischlin transforms.
+
+- `prove!`/`verify!` (transform = "fs" or "fischlin") now accept:
+  - `require = ["label1", "label2"]` — coverage obligations: labels that must be absorbed before sampling challenges (FS) or finalizing the common hash (Fischlin).
+  - `bind = |o: &mut _, i: usize, m_bytes: &[u8]| { ... }` — closure that performs `fsr_core::TranscriptRuntime::absorb(o, "label", bytes)` for each required label. The macro statically checks that all required labels are actually absorbed in this closure.
+  - If anything is missing, you get a compile-time error with an actionable hint, e.g.:
+    - `coverage: missing absorb() for labels before challenge: c_0. add: fsr_core::TranscriptRuntime::absorb(o, "c_0", <bytes>)`
+
+Examples:
+
+- FS, DSL:
+  - OK: `fsr-core/examples/sigma_or_dsl_fs_ok.rs`, `fsr-core/examples/sigma_and_dsl_fs_ok.rs`
+  - Bug (fails to compile): `fsr-core/examples/sigma_or_dsl_fs_bug.rs`, `fsr-core/examples/sigma_and_dsl_fs_bug.rs`
+- Fischlin, DSL:
+  - OK: `fsr-core/examples/sigma_or_dsl_fischlin_ok.rs`, `fsr-core/examples/sigma_and_dsl_fischlin_ok.rs`
+  - Bug (fails to compile): `fsr-core/examples/sigma_or_dsl_fischlin_bug.rs`, `fsr-core/examples/sigma_and_dsl_fischlin_bug.rs`
+- Non-DSL FS with an attribute lint:
+  - OK: `fsr-core/examples/sigma_or_fs_ok.rs`
+  - Bug (fails to compile): `fsr-core/examples/sigma_or_fs_bug.rs` using `#[enforce_fs_coverage(required = "c_0,c_1")]`.
+
+### Verifier source and proof bytes
+
+- Call `verify_source!{ ... }` with the same arguments as `verify!` to print the runnable verifier for FS or Fischlin.
+- All proofs implement `encode()`; the examples print the proof length and hex bytes.
+
+---
+
+## Higher-level `proof!` DSL (end-to-end)
+
+The `proof!` macro lets you specify a proof schema (fields + replay + check) and generates a module with:
+
+- `Proof` struct with `encode()/decode()`
+- `prove(events: &[RecEvent]) -> Option<Proof>` — emits a compact proof by scanning a recorded transcript (see `fsr_core::RecordingHashOracle`).
+- `verify(pub_in: &T, proof: &Proof) -> bool` and `verify_bytes(pub_in: &T, bytes: &[u8]) -> bool`
+- `verifier_source() -> &'static str` — the source for the generated verifier
+- `REQUIRED_LABELS: &[&'static str]` — first-class coverage obligations derived from the spec (absorbs and replay binds)
+
+Example: `fsr-core/examples/sigma_and_proof_dsl_end_to_end.rs` records a transcript, uses the generated module to produce a compact proof, verifies without any manual `require`/`bind` wiring, and prints the verifier source.
+
+These higher-level modules ensure coverage by construction: the replay block declares exactly what gets absorbed before challenges; the verifier replays the same transcript, and the implementation refuses to accept mismatches.
+
+---
+
 ## Notes & Recommendations
 
 * Replace the demo challenge reducer with a **real hash-to-field** for your curve/field type.

@@ -149,28 +149,17 @@ fn main() -> Result<()> {
 
     println!("Sigma-OR FS verify = {}", ok);
     let proof_bytes = proof.encode();
-    println!("Sigma-OR FS proof bytes: {}", proof_bytes.len());
+    println!("Sigma-OR FS proof bytes ({}): 0x{}", proof_bytes.len(), hex::encode(&proof_bytes));
 
-    // Print verifier source code (for illustration)
-    const VERIFIER_SRC: &str = r#"
-fn verify_sigma_or(pubc: &Public, stmt: &[u8], sid: &[u8], proof: &FsProof) -> bool {
-    let mut oracle = FSOracle::new(HashOracle::new(b"YavOracle/SigmaOR/FS"));
-    oracle.absorb("mode", b"FS");
-    oracle.absorb("x", stmt);
-    oracle.absorb("sid", sid);
-    let t0 = G1(dec_le_u64(&proof.m[0][0..8]));
-    let t1 = G1(dec_le_u64(&proof.m[0][8..16]));
-    oracle.absorb("c_0", &enc_u64(t0.0));
-    oracle.absorb("c_1", &enc_u64(t1.0));
-    let e_bytes = oracle.derive_challenge("e", &[], 32);
-    let e = Scalar(dec_le_u64(&e_bytes) % ORDER_Q);
-    let e0 = Scalar(dec_le_u64(&proof.z[0][0..8]) % ORDER_Q);
-    let z0 = Scalar(dec_le_u64(&proof.z[0][8..16]) % ORDER_Q);
-    let z1 = Scalar(dec_le_u64(&proof.z[0][16..24]) % ORDER_Q);
-    let e1 = Scalar((e.0 + ORDER_Q - (e0.0 % ORDER_Q)) % ORDER_Q);
-    pubc.g.pow(z0) == t0 * pubc.y0.pow(e0) && pubc.g.pow(z1) == t1 * pubc.y1.pow(e1)
-}
-"#;
-    println!("Verifier source (FS):\n{}", &VERIFIER_SRC[0..VERIFIER_SRC.len().min(240)]);
+    // Verifier source via DSL helper
+    let src = fsr_proof_dsl::verify_source! {
+        transform = "fs",
+        oracle = HashOracle::new(b"YavOracle/SigmaOR/FS"),
+        statement = &statement_for_verify,
+        sid = sid,
+        proof = &proof,
+        sigma_verify = |_i, m_bytes, e_bytes, z_bytes| { let _ = (m_bytes, e_bytes, z_bytes); true }
+    };
+    println!("Verifier source (FS):\n{}", src);
     Ok(())
 }

@@ -51,7 +51,24 @@ impl CanonicalEncode for [u8] {
     fn encode(&self, out: &mut Vec<u8>) { out.extend_from_slice(self); }
 }
 impl CanonicalEncode for Vec<u8> {
-    fn encode(&self, out: &mut Vec<u8>) { out.extend_from_slice(self); }
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(self.len() as u32).to_le_bytes());
+        out.extend_from_slice(self);
+    }
+}
+
+impl CanonicalDecode for Vec<u8> {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        if input.len() < 4 { return None; }
+        let mut lenb = [0u8; 4];
+        lenb.copy_from_slice(&input[..4]);
+        let len = u32::from_le_bytes(lenb) as usize;
+        *input = &input[4..];
+        if input.len() < len { return None; }
+        let v = input[..len].to_vec();
+        *input = &input[len..];
+        Some(v)
+    }
 }
 
 pub trait Absorb {
@@ -77,6 +94,16 @@ impl Challenge for U64Challenge {
 
 impl CanonicalEncode for U64Challenge {
     fn encode(&self, out: &mut Vec<u8>) { self.0.encode(out); }
+}
+
+impl CanonicalDecode for U64Challenge {
+    fn decode(input: &mut &[u8]) -> Option<Self> {
+        if input.len() < 8 { return None; }
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&input[..8]);
+        *input = &input[8..];
+        Some(U64Challenge(u64::from_le_bytes(b)))
+    }
 }
 
 // ---------------- Oracle abstraction (FS or interactive) ----------------

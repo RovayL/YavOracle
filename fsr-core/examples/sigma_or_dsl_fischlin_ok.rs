@@ -94,5 +94,22 @@ fn main() -> Result<()> {
         }
     };
     println!("Sigma-OR DSL/Fischlin verify = {}", ok);
+    // Print bytes and verifier source
+    println!("Proof bytes ({}): 0x{}", proof.encode().len(), hex::encode(&proof.encode()));
+    let src = fsr_proof_dsl::verify_source! {
+        transform = "fischlin",
+        oracle = FischlinOracle::new(HashOracle::new(b"YavOracle/SigmaOR/DSL/Fischlin"), FischlinParams::new(rho, b_bits)),
+        statement = &statement,
+        sid = sid,
+        proof = &proof,
+        require = ["c_0", "c_1"],
+        bind = |o: &mut _, _i: usize, m_bytes: &[u8]| {
+            let t0b = &m_bytes[0..8]; let t1b = &m_bytes[8..16];
+            fsr_core::TranscriptRuntime::absorb(o, "c_0", t0b);
+            fsr_core::TranscriptRuntime::absorb(o, "c_1", t1b);
+        },
+        sigma_verify = |_i: usize, _m: &[u8], _e: &[u8], _z: &[u8]| { true }
+    };
+    println!("Verifier source (Fischlin):\n{}", src);
     Ok(())
 }
