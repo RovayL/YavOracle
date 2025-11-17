@@ -91,7 +91,10 @@ where
 {
     if !proof.is_well_formed() { return false; }
     if proof.b != params.b || proof.rho != params.rho { return false; }
-    if (params.rho as u32) * (params.b as u32) < params.kappa_c as u32 { return false; }
+    // n-special: require rho * (b - ceil_log2(n-1)) >= kappa_c
+    let loss = if params.n_special <= 2 { 0 } else { 32u32.saturating_sub(((params.n_special as u32 - 1)).leading_zeros()) };
+    if (params.b as u32) < loss { return false; }
+    if (params.rho as u32) * ((params.b as u32) - loss) < params.kappa_c as u32 { return false; }
 
     let mut oracle = FischlinOracle::new(ro, params);
     oracle.begin_verifier(x_bytes, sid);

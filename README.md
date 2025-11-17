@@ -275,3 +275,29 @@ These higher-level modules ensure coverage by construction: the replay block dec
   * `InteractiveProverOracle` / `InteractiveVerifierOracle` (interactive mode, `--features interactive`).
 
 This way, you get **correct-by-construction** Fiat–Shamir conversions and sharply reduced room for coverage bugs like the ones seen in the wild.
+
+---
+
+## n-special soundness in Fischlin mode
+
+Fischlin’s transform in `fsr-core` supports generic **n-special sound** Σ-protocols via an explicit parameter on the runtime:
+
+- `FischlinParams` now carries `n_special: u16` (default `2`), representing the `n` in "n-special soundness" of the underlying Σ-protocol.
+- Soundness is enforced by an *effective* bit-budget check derived from the Fischlin analysis for n-special soundness:
+  - Let `loss = ceil(log2(n_special - 1))` (with `loss = 0` when `n_special <= 2`).
+  - The prover-side and verifier-side checks both require
+    - `rho * (b - loss) >= kappa_c`,
+    where `rho` is the number of repetitions, `b` is the truncated hash length, and `kappa_c` is the target computational security level.
+  - If `b < loss`, or the inequality fails, proof generation/verification returns an `UnsoundParams` error or rejects the proof.
+- This models the fact that, for n-special soundness, the prover can reuse up to `n-1` distinct challenges per repetition before the extractor sees `n` distinct accepting transcripts, effectively "burning" about `log2(n-1)` bits of the predicate.
+
+API-wise, you keep the same Fischlin prover/verify flow; only parameter selection changes:
+
+- Prover/verifier choose `(rho, b, kappa_c, n_special)` so that the inequality holds.
+- The transform code and DSL bindings are unchanged; they just call into `FischlinOracle` instantiated with these parameters.
+
+A concrete example of n-special usage is in
+
+- `fsr-core/examples/sigma_and_dsl_fischlin_nspecial_ok.rs:1`
+
+which sets `n_special = 3` for a toy Σ-protocol, and uses `rho = 32`, `b = 8`, and `kappa_c = 128`, yielding an effective budget `rho * (b - ceil(log2(2))) = 32 * 7 = 224` bits.

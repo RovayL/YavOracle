@@ -10,14 +10,19 @@ pub struct FischlinParams {
     pub b: u8,
     pub t: u8,
     pub kappa_c: u16,
+    /// n in "n-special soundness" (default 2)
+    pub n_special: u16,
 }
 impl FischlinParams {
     pub fn new(rho: u16, b: u8) -> Self {
         let t = if rho <= 64 { b.saturating_add(5) } else { b.saturating_add(6) };
-        Self { rho, b, t, kappa_c: 128 }
+        Self { rho, b, t, kappa_c: 128, n_special: 2 }
     }
     pub fn with_t(mut self, t: u8) -> Self { self.t = t; self }
     pub fn with_kappa(mut self, k: u16) -> Self { self.kappa_c = k; self }
+    /// Set n in n-special soundness (n >= 2). When n > 2, the effective
+    /// security per repetition loses roughly ceil(log2(n-1)) bits.
+    pub fn with_n_special(mut self, n: u16) -> Self { self.n_special = n.max(2); self }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,9 +93,15 @@ impl<RO: RandomOracle> FischlinOracle<RO> {
         if self.m_vec.len() as u16 != self.params.rho {
             return Err(ProveError::Malformed("fischlin: m_vec len != rho"));
         }
-        let lhs = (self.params.rho as u32) * (self.params.b as u32);
+        // n-special soundness parameter check: rho * (b - ceil_log2(n-1)) >= kappa_c
+        let loss = ceil_log2_n_minus_1(self.params.n_special as u32);
+        if (self.params.b as u32) < loss {
+            return Err(ProveError::UnsoundParams("fischlin: b too small for n-special soundness"));
+        }
+        let eff_b = (self.params.b as u32) - loss;
+        let lhs = (self.params.rho as u32) * eff_b;
         if lhs < self.params.kappa_c as u32 {
-            return Err(ProveError::UnsoundParams("fischlin: rho*b < kappa_c"));
+            return Err(ProveError::UnsoundParams("fischlin: rho*(b - log2(n-1)) < kappa_c"));
         }
 
         let mut buf = Vec::new();
@@ -295,6 +306,18 @@ fn write_e_bytes(e_val: u64, dst: &mut [u8]) {
     let bytes = e_val.to_le_bytes();
     let n = dst.len().min(bytes.len());
     dst[..n].copy_from_slice(&bytes[..n]);
+}
+
+#[inline]
+fn ceil_log2_u32(x: u32) -> u32 {
+    if x <= 1 { return 0; }
+    32u32.saturating_sub((x - 1).leading_zeros())
+}
+
+#[inline]
+fn ceil_log2_n_minus_1(n: u32) -> u32 {
+    if n <= 2 { return 0; }
+    ceil_log2_u32(n - 1)
 }
 
 
